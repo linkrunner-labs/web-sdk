@@ -65,11 +65,10 @@ lr.track('purchase', { amount: 49.99, currency: 'USD' })
 
 ### Script tag attributes
 
-| Attribute       | Required | Description                          | Default                                        |
-| --------------- | -------- | ------------------------------------ | ---------------------------------------------- |
-| `data-token`    | Yes      | Your Linkrunner project token        | —                                              |
-| `data-endpoint` | No       | Custom collection endpoint           | `https://collect.linkrunner.io/api/web/collect` |
-| `data-spa`      | No       | Set to `"false"` to disable SPA mode | `true`                                         |
+| Attribute    | Required | Description                          | Default |
+| ------------ | -------- | ------------------------------------ | ------- |
+| `data-token` | Yes      | Your Linkrunner project token        | —       |
+| `data-spa`   | No       | Set to `"false"` to disable SPA mode | `true`  |
 
 ### JavaScript config object
 
@@ -79,7 +78,6 @@ You can also configure via `window.LinkrunnerConfig` before the script loads:
 <script>
   window.LinkrunnerConfig = {
     token: 'YOUR_PROJECT_TOKEN',
-    endpoint: 'https://your-custom-endpoint.com/collect', // optional
     spa: true // optional, default true
   }
 </script>
