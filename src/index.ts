@@ -1,5 +1,6 @@
 export interface Linkrunner {
   track: (eventName: string, eventData?: Record<string, any>) => void
+  identify: (userId: string) => void
   _q: any[]
   _version: string
 }
@@ -19,10 +20,11 @@ function getOrCreateStub(): Linkrunner {
   if (typeof window === 'undefined') {
     return {
       _q: [],
-      _version: '0.1.0',
+      _version: '0.1.2',
       track: function (...args: any[]) {
         this._q.push(args)
       },
+      identify: function () {},
     }
   }
 
@@ -32,10 +34,11 @@ function getOrCreateStub(): Linkrunner {
 
   window.lr = window.lr || {
     _q: [],
-    _version: '0.1.0',
+    _version: '0.1.2',
     track: function (...args: any[]) {
       this._q.push(args)
     },
+    identify: function () {},
   }
 
   return window.lr

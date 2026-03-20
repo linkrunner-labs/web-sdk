@@ -86,6 +86,21 @@ You can also configure via `window.LinkrunnerConfig` before the script loads:
 <script src="https://cdn.linkrunner.io/web/v1/lr.js" defer></script>
 ```
 
+## User identification
+
+Associate events with a known user by calling `identify` with your internal user ID:
+
+```js
+// Via the global lr object (script tag)
+window.lr.identify('user_123')
+
+// Via the npm import
+import { lr } from '@linkrunner/web'
+lr.identify('user_123')
+```
+
+Call `identify` once the user logs in or is otherwise known. The user ID is persisted in `localStorage` and included in all subsequent events as `user_id`.
+
 ## Custom events
 
 ```js

@@ -157,6 +157,17 @@
   var visitor = getOrCreateId(localStorage, 'lr_vid');
   var session = getOrCreateId(sessionStorage, 'lr_sid');
 
+  // User ID (set via lr.identify)
+  function getUserId() {
+    return safeGet(localStorage, 'lr_uid') || '';
+  }
+
+  function setUserId(userId) {
+    if (userId && typeof userId === 'string') {
+      safeSet(localStorage, 'lr_uid', userId);
+    }
+  }
+
   // ============================================================
   // CLICK ID PERSISTENCE (localStorage, 90-day TTL)
   // ============================================================
@@ -453,6 +464,7 @@
       // Identity
       visitor_id: visitor.id,
       session_id: session.id,
+      user_id: getUserId(),
       is_new_visitor: visitor.isNew ? 1 : 0,
 
       // Page
@@ -596,7 +608,8 @@
   window.lr = {
     _q: [],
     track: trackCustomEvent,
-    _version: '0.1.0'
+    identify: function(userId) { setUserId(userId); },
+    _version: '0.1.2'
   };
 
   // Replay queued events
