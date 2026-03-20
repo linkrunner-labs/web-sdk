@@ -19,7 +19,7 @@
 
   var COLLECT_ENDPOINT = configObj.endpoint
     || (scriptTag && scriptTag.getAttribute('data-endpoint'))
-    || 'https://api.linkrunner.io/api/web/collect';
+    || 'https://api.linkrunner.io/web/collect';
 
   var SPA_ENABLED = configObj.spa !== false
     && !(scriptTag && scriptTag.getAttribute('data-spa') === 'false');
@@ -609,7 +609,7 @@
     _q: [],
     track: trackCustomEvent,
     identify: function(userId) { setUserId(userId); },
-    _version: '0.1.3'
+    _version: '0.1.4'
   };
 
   // Replay queued events

@@ -20,7 +20,7 @@ function getOrCreateStub(): Linkrunner {
   if (typeof window === 'undefined') {
     return {
       _q: [],
-      _version: '0.1.2',
+      _version: '0.1.4',
       track: function (...args: any[]) {
         this._q.push(args)
       },
@@ -34,7 +34,7 @@ function getOrCreateStub(): Linkrunner {
 
   window.lr = window.lr || {
     _q: [],
-    _version: '0.1.2',
+    _version: '0.1.4',
     track: function (...args: any[]) {
       this._q.push(args)
     },
