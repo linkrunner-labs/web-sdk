@@ -1,0 +1,39 @@
+name: Deploy to CDN
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - run: npm ci
+
+      - run: npm run build
+
+      - name: Upload to S3
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: ${{ vars.AWS_REGION }}
+
+      - name: Sync to S3 and invalidate CloudFront
+        run: |
+          aws s3 cp dist/lr.js s3://${{ vars.CDN_S3_BUCKET }}/web/v1/lr.js \
+            --content-type "application/javascript" \
+            --cache-control "public, max-age=3600, s-maxage=86400"
+          aws s3 cp dist/lr.min.js s3://${{ vars.CDN_S3_BUCKET }}/web/v1/lr.min.js \
+            --content-type "application/javascript" \
+            --cache-control "public, max-age=3600, s-maxage=86400"
+          aws cloudfront create-invalidation \
+            --distribution-id ${{ vars.CLOUDFRONT_DISTRIBUTION_ID }} \
+            --paths "/web/v1/*"

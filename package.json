@@ -1,0 +1,73 @@
+{
+  "name": "@linkrunner/web",
+  "version": "0.1.0",
+  "description": "Linkrunner web attribution SDK — track page views, custom events, and traffic sources with first-touch and last-touch attribution",
+  "main": "dist/index.js",
+  "module": "dist/index.mjs",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.mjs",
+      "require": "./dist/index.js"
+    },
+    "./next": {
+      "types": "./dist/next.d.ts",
+      "import": "./dist/next.mjs",
+      "require": "./dist/next.js"
+    },
+    "./script": "./dist/lr.min.js"
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build:core": "terser src/core.js -o dist/lr.min.js --compress --mangle && cp src/core.js dist/lr.js",
+    "build:ts": "tsup src/index.ts src/next.tsx --format esm,cjs --dts --out-dir dist --external next --external react",
+    "build": "npm run build:ts && npm run build:core",
+    "dev": "npm run build && cd test-app && npm run dev",
+    "dev:watch": "npx concurrently \"tsup src/index.ts src/next.tsx --format esm,cjs --dts --out-dir dist --external next --external react --watch\" \"cd test-app && npm run dev\"",
+    "test:link": "npm run build && npm link && cd test-app && npm link @linkrunner/web && npm run dev",
+    "prepublishOnly": "npm run build"
+  },
+  "devDependencies": {
+    "@types/react": "^18.2.0",
+    "concurrently": "^9.2.1",
+    "next": "^14.0.0",
+    "react": "^18.2.0",
+    "terser": "^5.31.0",
+    "tsup": "^8.0.0",
+    "typescript": "^5.4.0"
+  },
+  "peerDependencies": {
+    "next": ">=13.0.0",
+    "react": ">=18.0.0"
+  },
+  "peerDependenciesMeta": {
+    "next": {
+      "optional": true
+    },
+    "react": {
+      "optional": true
+    }
+  },
+  "keywords": [
+    "analytics",
+    "attribution",
+    "web-sdk",
+    "linkrunner",
+    "tracking",
+    "utm",
+    "page-view",
+    "ai-search"
+  ],
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/linkrunner-labs/web-sdk"
+  },
+  "homepage": "https://linkrunner.io",
+  "license": "MIT",
+  "publishConfig": {
+    "access": "public"
+  }
+}
