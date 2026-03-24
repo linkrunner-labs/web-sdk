@@ -12,6 +12,7 @@ declare global {
       token: string
       endpoint?: string
       spa?: boolean
+      debug?: boolean
     }
   }
 }
@@ -20,7 +21,7 @@ function getOrCreateStub(): Linkrunner {
   if (typeof window === 'undefined') {
     return {
       _q: [],
-      _version: '0.1.4',
+      _version: '0.1.6',
       track: function (...args: any[]) {
         this._q.push(args)
       },
@@ -34,7 +35,7 @@ function getOrCreateStub(): Linkrunner {
 
   window.lr = window.lr || {
     _q: [],
-    _version: '0.1.4',
+    _version: '0.1.6',
     track: function (...args: any[]) {
       this._q.push(args)
     },

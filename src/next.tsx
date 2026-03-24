@@ -6,9 +6,10 @@ interface LinkrunnerScriptProps {
   token: string
   endpoint?: string
   spa?: boolean
+  debug?: boolean
 }
 
-export function LinkrunnerScript({ token, endpoint, spa }: LinkrunnerScriptProps) {
+export function LinkrunnerScript({ token, endpoint, spa, debug }: LinkrunnerScriptProps) {
   const dataAttrs: Record<string, string> = {
     'data-token': token,
   }
@@ -19,6 +20,12 @@ export function LinkrunnerScript({ token, endpoint, spa }: LinkrunnerScriptProps
 
   if (spa === false) {
     dataAttrs['data-spa'] = 'false'
+  }
+
+  if (debug === true) {
+    dataAttrs['data-debug'] = 'true'
+  } else if (debug === false) {
+    dataAttrs['data-debug'] = 'false'
   }
 
   return (

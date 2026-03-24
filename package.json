@@ -1,6 +1,6 @@
 {
   "name": "@linkrunner/web",
-  "version": "0.1.5",
+  "version": "0.1.6",
   "description": "Linkrunner web attribution SDK — track page views, custom events, and traffic sources with first-touch and last-touch attribution",
   "main": "dist/index.js",
   "module": "dist/index.mjs",

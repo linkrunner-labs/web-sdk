@@ -65,10 +65,11 @@ lr.track('purchase', { amount: 49.99, currency: 'USD' })
 
 ### Script tag attributes
 
-| Attribute    | Required | Description                          | Default |
-| ------------ | -------- | ------------------------------------ | ------- |
-| `data-token` | Yes      | Your Linkrunner project token        | —       |
-| `data-spa`   | No       | Set to `"false"` to disable SPA mode | `true`  |
+| Attribute    | Required | Description                             | Default |
+| ------------ | -------- | --------------------------------------- | ------- |
+| `data-token` | Yes      | Your Linkrunner project token           | —       |
+| `data-spa`   | No       | Set to `"false"` to disable SPA mode    | `true`  |
+| `data-debug` | No       | `"true"` / `"false"` to force debug mode | Auto    |
 
 ### JavaScript config object
 
@@ -78,11 +79,54 @@ You can also configure via `window.LinkrunnerConfig` before the script loads:
 <script>
   window.LinkrunnerConfig = {
     token: 'YOUR_PROJECT_TOKEN',
-    spa: true // optional, default true
+    spa: true,  // optional, default true
+    debug: true // optional, auto-detected on localhost
   }
 </script>
 <script src="https://cdn.linkrunner.io/web/v1/lr.js" defer></script>
 ```
+
+## Debugging
+
+The SDK includes built-in debug logging that helps you understand what's happening under the hood.
+
+### Auto-detection
+
+Debug mode **turns on automatically** when your site runs on `localhost`, `127.0.0.1`, or `[::1]`. No configuration needed — just open your browser console during development.
+
+### Manual override
+
+Force debug mode on or off regardless of hostname:
+
+```html
+<!-- Script tag -->
+<script src="https://cdn.linkrunner.io/web/v1/lr.js" data-token="YOUR_TOKEN" data-debug="true"></script>
+```
+
+```js
+// Config object
+window.LinkrunnerConfig = { token: 'YOUR_TOKEN', debug: true }
+```
+
+```tsx
+// Next.js
+<LinkrunnerScript token="YOUR_TOKEN" debug={true} />
+```
+
+Setting `debug` to `false` disables logging even on localhost.
+
+### What gets logged
+
+All logs are prefixed with `[Linkrunner]` in the console:
+
+- **Initialization** — token, endpoint, SPA mode
+- **Identity** — visitor ID, session ID, new visitor detection
+- **URL params** — UTMs and click IDs extracted from the current URL
+- **Page views** — URL being tracked, SPA navigation events
+- **Custom events** — event name and data passed to `lr.track()`
+- **Payloads** — full request body sent to the collection endpoint
+- **Transport** — which method was used (sendBeacon, fetch, or XHR)
+- **Errors** — any caught errors are logged via `console.error`
 
 ## User identification
 

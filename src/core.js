@@ -24,6 +24,17 @@
   var SPA_ENABLED = configObj.spa !== false
     && !(scriptTag && scriptTag.getAttribute('data-spa') === 'false');
 
+  var DEBUG = (function() {
+    if (configObj.debug === true) return true;
+    if (configObj.debug === false) return false;
+    if (scriptTag && scriptTag.getAttribute('data-debug') === 'true') return true;
+    if (scriptTag && scriptTag.getAttribute('data-debug') === 'false') return false;
+    try {
+      var h = location.hostname;
+      return h === 'localhost' || h === '127.0.0.1' || h === '[::1]';
+    } catch (e) { return false; }
+  })();
+
   var CLICK_ID_TTL_MS = 90 * 24 * 60 * 60 * 1000; // 90 days
 
   // ============================================================
@@ -80,6 +91,24 @@
   var BOT_PATTERN = /bot|crawl|spider|slurp|facebookexternalhit|Googlebot|bingbot|yandex|baidu|duckduckgo|ia_archiver|pingdom|uptimerobot|headless|phantom|selenium|puppeteer|playwright|GPTBot|ChatGPT-User|ClaudeBot|PerplexityBot|Applebot/i;
 
   // ============================================================
+  // LOGGER
+  // ============================================================
+
+  function log(label, data) {
+    if (!DEBUG) return;
+    if (data !== undefined) {
+      console.log('[Linkrunner] ' + label, data);
+    } else {
+      console.log('[Linkrunner] ' + label);
+    }
+  }
+
+  function logError(label, error) {
+    if (!DEBUG) return;
+    console.error('[Linkrunner] ' + label, error);
+  }
+
+  // ============================================================
   // UTILITIES
   // ============================================================
 
@@ -95,6 +124,7 @@
       }
       return hex[0]+hex[1]+hex[2]+hex[3]+'-'+hex[4]+hex[5]+'-'+hex[6]+hex[7]+'-'+hex[8]+hex[9]+'-'+hex[10]+hex[11]+hex[12]+hex[13]+hex[14]+hex[15];
     } catch (e) {
+      logError('crypto.getRandomValues failed, using Math.random fallback', e);
       return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
         var r = Math.random() * 16 | 0;
         return (c === 'x' ? r : (r & 0x3 | 0x8)).toString(16);
@@ -114,32 +144,32 @@
           params[decodeURIComponent(pair[0])] = pair[1] ? decodeURIComponent(pair[1]) : '';
         }
       }
-    } catch (e) {}
+    } catch (e) { logError('Failed to parse query params', e); }
     return params;
   }
 
   function getReferringDomain(referrer) {
     if (!referrer) return '';
-    try { return new URL(referrer).hostname; } catch (e) { return ''; }
+    try { return new URL(referrer).hostname; } catch (e) { logError('Failed to parse referrer URL', e); return ''; }
   }
 
   function getCanonicalUrl() {
     try {
       var link = document.querySelector('link[rel="canonical"]');
       return link ? link.getAttribute('href') || '' : '';
-    } catch (e) { return ''; }
+    } catch (e) { logError('Failed to get canonical URL', e); return ''; }
   }
 
   function safeGet(storage, key) {
-    try { return storage.getItem(key); } catch (e) { return null; }
+    try { return storage.getItem(key); } catch (e) { logError('Storage read failed for ' + key, e); return null; }
   }
 
   function safeSet(storage, key, value) {
-    try { storage.setItem(key, value); } catch (e) {}
+    try { storage.setItem(key, value); } catch (e) { logError('Storage write failed for ' + key, e); }
   }
 
   function safeRemove(storage, key) {
-    try { storage.removeItem(key); } catch (e) {}
+    try { storage.removeItem(key); } catch (e) { logError('Storage remove failed for ' + key, e); }
   }
 
   // ============================================================
@@ -156,6 +186,7 @@
 
   var visitor = getOrCreateId(localStorage, 'lr_vid');
   var session = getOrCreateId(sessionStorage, 'lr_sid');
+  log('Identity', { visitor_id: visitor.id, new_visitor: visitor.isNew, session_id: session.id });
 
   // User ID (set via lr.identify)
   function getUserId() {
@@ -186,7 +217,7 @@
         return '';
       }
       return parsed.v || '';
-    } catch (e) { return ''; }
+    } catch (e) { logError('Failed to parse click ID ' + key, e); return ''; }
   }
 
   function setFirstTouchClickId(key, value) {
@@ -228,11 +259,14 @@
 
   function persistParams() {
     var params = getQueryParams();
+    var foundUtms = {};
+    var foundClickIds = {};
 
     // UTMs → sessionStorage (last-touch, per session)
     for (var i = 0; i < UTM_KEYS.length; i++) {
       var key = UTM_KEYS[i];
       if (params[key]) {
+        foundUtms[key] = params[key];
         safeSet(sessionStorage, 'lr_' + key, params[key]);
         setFirstTouchUtm(key, params[key]);
       }
@@ -242,10 +276,14 @@
     for (var j = 0; j < CLICK_ID_KEYS.length; j++) {
       var cidKey = CLICK_ID_KEYS[j];
       if (params[cidKey]) {
+        foundClickIds[cidKey] = params[cidKey];
         setClickId(cidKey, params[cidKey]);
         setFirstTouchClickId(cidKey, params[cidKey]);
       }
     }
+
+    if (Object.keys(foundUtms).length) log('UTM params found', foundUtms);
+    if (Object.keys(foundClickIds).length) log('Click IDs found', foundClickIds);
   }
 
   function getPersistedUtms() {
@@ -390,7 +428,7 @@
         ttfb: Math.max(0, nav.responseStart - nav.requestStart),
         dom_interactive: Math.max(0, nav.domInteractive - nav.startTime)
       };
-    } catch (e) { return {}; }
+    } catch (e) { logError('Failed to collect performance metrics', e); return {}; }
   }
 
   // ============================================================
@@ -399,35 +437,42 @@
 
   function send(data) {
     var json = JSON.stringify(data);
+    log('Sending ' + data.event_type + (data.event_name ? ':' + data.event_name : ''), data);
 
     // Priority 1: sendBeacon
     if (navigator.sendBeacon) {
       try {
         var blob = new Blob([json], { type: 'application/json' });
-        if (navigator.sendBeacon(COLLECT_ENDPOINT, blob)) return;
-      } catch (e) {}
+        if (navigator.sendBeacon(COLLECT_ENDPOINT, blob)) {
+          log('Sent via sendBeacon');
+          return;
+        }
+        log('sendBeacon returned false, falling back to fetch');
+      } catch (e) { logError('sendBeacon failed', e); }
     }
 
     // Priority 2: fetch with keepalive
     if (typeof fetch !== 'undefined') {
       try {
+        log('Sending via fetch');
         fetch(COLLECT_ENDPOINT, {
           method: 'POST',
           body: json,
           keepalive: true,
           headers: { 'Content-Type': 'application/json' }
-        }).catch(function() {});
-      } catch (e) {}
+        }).catch(function(e) { logError('fetch request failed', e); });
+      } catch (e) { logError('fetch call failed', e); }
       return;
     }
 
     // Priority 3: XHR
     try {
+      log('Sending via XHR');
       var xhr = new XMLHttpRequest();
       xhr.open('POST', COLLECT_ENDPOINT, true);
       xhr.setRequestHeader('Content-Type', 'application/json');
       xhr.send(json);
-    } catch (e) {}
+    } catch (e) { logError('XHR send failed', e); }
   }
 
   // ============================================================
@@ -555,8 +600,12 @@
   function collectPageView() {
     // Deduplicate — skip if URL hasn't changed (can happen with replaceState)
     var currentUrl = location.href;
-    if (currentUrl === lastPageUrl) return;
+    if (currentUrl === lastPageUrl) {
+      log('Page view skipped (duplicate URL)', currentUrl);
+      return;
+    }
     lastPageUrl = currentUrl;
+    log('Collecting page view', currentUrl);
 
     var payload = buildPayload('page_view', '', null);
 
@@ -571,7 +620,11 @@
   }
 
   function trackCustomEvent(eventName, eventData) {
-    if (!eventName || typeof eventName !== 'string') return;
+    log('track() called', { eventName: eventName, eventData: eventData });
+    if (!eventName || typeof eventName !== 'string') {
+      logError('track() ignored — eventName must be a non-empty string, got:', eventName);
+      return;
+    }
     var payload = buildPayload('custom', eventName, eventData || null);
     send(payload);
   }
@@ -584,16 +637,19 @@
     var origPushState = history.pushState;
     history.pushState = function() {
       origPushState.apply(this, arguments);
+      log('SPA navigation (pushState)');
       setTimeout(collectPageView, 100);
     };
 
     var origReplaceState = history.replaceState;
     history.replaceState = function() {
       origReplaceState.apply(this, arguments);
+      log('SPA navigation (replaceState)');
       setTimeout(collectPageView, 100);
     };
 
     window.addEventListener('popstate', function() {
+      log('SPA navigation (popstate)');
       setTimeout(collectPageView, 100);
     });
   }
@@ -609,19 +665,22 @@
     _q: [],
     track: trackCustomEvent,
     identify: function(userId) { setUserId(userId); },
-    _version: '0.1.4'
+    _version: '0.1.6'
   };
 
   // Replay queued events
+  if (existingQueue.length) log('Replaying ' + existingQueue.length + ' queued event(s)');
   for (var qi = 0; qi < existingQueue.length; qi++) {
     try {
       trackCustomEvent.apply(null, existingQueue[qi]);
-    } catch (e) {}
+    } catch (e) { logError('Failed to replay queued event', e); }
   }
 
   // ============================================================
   // INITIALIZATION
   // ============================================================
+
+  log('Initialized', { token: TOKEN.slice(0, 8) + '...', endpoint: COLLECT_ENDPOINT, spa: SPA_ENABLED });
 
   expireOldClickIds();
   persistParams();
