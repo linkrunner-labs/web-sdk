@@ -74,11 +74,15 @@ export default function App({ Component, pageProps }) {
 
 ### Custom events
 
-Use `window.lr.track()` to fire custom events from anywhere in your app:
+Fire custom events from anywhere in your app using either approach:
 
 ```js
+// Via the npm import
+import { lr } from '@linkrunner/web'
+lr.track('purchase', { amount: 49.99, currency: 'USD' })
+
+// Or via the global object
 window.lr.track('signup', { plan: 'pro' })
-window.lr.track('purchase', { amount: 49.99, currency: 'USD' })
 ```
 
 Events can be queued before the script loads — they'll be replayed automatically once initialized.
@@ -155,7 +159,10 @@ All logs are prefixed with `[Linkrunner]` in the console:
 Associate events with a known user by calling `identify` with your internal user ID:
 
 ```js
-window.lr.identify('user_123')
+import { lr } from '@linkrunner/web'
+lr.identify('user_123')
+
+// or: window.lr.identify('user_123')
 ```
 
 Call `identify` once the user logs in or is otherwise known. The user ID is persisted in `localStorage` and included in all subsequent events as `user_id`.
@@ -163,7 +170,10 @@ Call `identify` once the user logs in or is otherwise known. The user ID is pers
 ## Custom events
 
 ```js
-window.lr.track('event_name', { key: 'value' })
+import { lr } from '@linkrunner/web'
+lr.track('event_name', { key: 'value' })
+
+// or: window.lr.track('event_name', { key: 'value' })
 ```
 
 Events can be queued before the script loads — they'll be replayed automatically once initialized.
