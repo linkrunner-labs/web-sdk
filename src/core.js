@@ -661,12 +661,12 @@
   // Process any queued calls from the pre-init stub
   var existingQueue = (window.lr && window.lr._q) || [];
 
-  window.lr = {
-    _q: [],
-    track: trackCustomEvent,
-    identify: function(userId) { setUserId(userId); },
-    _version: '0.1.6'
-  };
+  // Mutate the existing object so npm import references stay valid
+  if (!window.lr) window.lr = {};
+  window.lr._q = [];
+  window.lr.track = trackCustomEvent;
+  window.lr.identify = function(userId) { setUserId(userId); };
+  window.lr._version = '0.1.7';
 
   // Replay queued events
   if (existingQueue.length) log('Replaying ' + existingQueue.length + ' queued event(s)');

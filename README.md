@@ -34,9 +34,12 @@ Add the script to your HTML with your project token:
 ></script>
 ```
 
-### Next.js
+### Next.js (App Router)
+
+Place `LinkrunnerScript` in your root `layout.tsx` so it loads once and persists across all navigations:
 
 ```tsx
+// app/layout.tsx
 import { LinkrunnerScript } from '@linkrunner/web/next'
 
 export default function RootLayout({ children }) {
@@ -51,15 +54,34 @@ export default function RootLayout({ children }) {
 }
 ```
 
-### NPM import (any JS framework)
+### Next.js (Pages Router)
+
+Place `LinkrunnerScript` in `_app.tsx` — not in `_document.tsx` or individual pages:
+
+```tsx
+// pages/_app.tsx
+import { LinkrunnerScript } from '@linkrunner/web/next'
+
+export default function App({ Component, pageProps }) {
+  return (
+    <>
+      <LinkrunnerScript token="YOUR_PROJECT_TOKEN" />
+      <Component {...pageProps} />
+    </>
+  )
+}
+```
+
+### Custom events
+
+Use `window.lr.track()` to fire custom events from anywhere in your app:
 
 ```js
-import { lr } from '@linkrunner/web'
-
-// Track custom events
-lr.track('signup', { plan: 'pro' })
-lr.track('purchase', { amount: 49.99, currency: 'USD' })
+window.lr.track('signup', { plan: 'pro' })
+window.lr.track('purchase', { amount: 49.99, currency: 'USD' })
 ```
+
+Events can be queued before the script loads — they'll be replayed automatically once initialized.
 
 ## Configuration
 
@@ -133,12 +155,7 @@ All logs are prefixed with `[Linkrunner]` in the console:
 Associate events with a known user by calling `identify` with your internal user ID:
 
 ```js
-// Via the global lr object (script tag)
 window.lr.identify('user_123')
-
-// Via the npm import
-import { lr } from '@linkrunner/web'
-lr.identify('user_123')
 ```
 
 Call `identify` once the user logs in or is otherwise known. The user ID is persisted in `localStorage` and included in all subsequent events as `user_id`.
@@ -146,12 +163,7 @@ Call `identify` once the user logs in or is otherwise known. The user ID is pers
 ## Custom events
 
 ```js
-// Via the global lr object (script tag)
 window.lr.track('event_name', { key: 'value' })
-
-// Via the npm import
-import { lr } from '@linkrunner/web'
-lr.track('event_name', { key: 'value' })
 ```
 
 Events can be queued before the script loads — they'll be replayed automatically once initialized.
