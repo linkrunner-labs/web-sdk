@@ -666,7 +666,7 @@
   window.lr._q = [];
   window.lr.track = trackCustomEvent;
   window.lr.identify = function(userId) { setUserId(userId); };
-  window.lr._version = '0.1.7';
+  window.lr._version = '0.1.8';
 
   // Replay queued events
   if (existingQueue.length) log('Replaying ' + existingQueue.length + ' queued event(s)');
