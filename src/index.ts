@@ -25,7 +25,9 @@ function getOrCreateStub(): Linkrunner {
       track: function (...args: any[]) {
         this._q.push(args)
       },
-      identify: function () {},
+      identify: function (userId: string) {
+        this._q.push(['__identify', userId])
+      },
     }
   }
 
@@ -39,7 +41,9 @@ function getOrCreateStub(): Linkrunner {
     track: function (...args: any[]) {
       this._q.push(args)
     },
-    identify: function () {},
+    identify: function (userId: string) {
+        this._q.push(['__identify', userId])
+      },
   }
 
   return window.lr

@@ -172,6 +172,20 @@
     try { storage.removeItem(key); } catch (e) { logError('Storage remove failed for ' + key, e); }
   }
 
+  function getCookie(name) {
+    try {
+      var match = document.cookie.match(new RegExp('(?:^|; )' + name + '=([^;]*)'));
+      return match ? decodeURIComponent(match[1]) : '';
+    } catch (e) { logError('Cookie read failed for ' + name, e); return ''; }
+  }
+
+  function setCookie(name, value, days) {
+    try {
+      var expires = new Date(Date.now() + days * 864e5).toUTCString();
+      document.cookie = name + '=' + encodeURIComponent(value) + '; expires=' + expires + '; path=/; SameSite=Lax';
+    } catch (e) { logError('Cookie write failed for ' + name, e); }
+  }
+
   // ============================================================
   // IDENTITY MANAGER
   // ============================================================
@@ -279,6 +293,35 @@
         foundClickIds[cidKey] = params[cidKey];
         setClickId(cidKey, params[cidKey]);
         setFirstTouchClickId(cidKey, params[cidKey]);
+      }
+    }
+
+    // Meta cookies — fall back to document.cookie if not found in URL params
+    if (!foundClickIds.fbp) {
+      var fbpCookie = getCookie('_fbp');
+      if (fbpCookie) {
+        foundClickIds.fbp = fbpCookie;
+        setClickId('fbp', fbpCookie);
+        setFirstTouchClickId('fbp', fbpCookie);
+      }
+    }
+    if (!foundClickIds.fbc) {
+      var fbcCookie = getCookie('_fbc');
+      if (fbcCookie) {
+        foundClickIds.fbc = fbcCookie;
+        setClickId('fbc', fbcCookie);
+        setFirstTouchClickId('fbc', fbcCookie);
+      }
+    }
+
+    // Write _fbc cookie from fbclid in Meta's standard format
+    if (params.fbclid) {
+      var fbcValue = 'fb.1.' + Date.now() + '.' + params.fbclid;
+      setCookie('_fbc', fbcValue, 90);
+      if (!foundClickIds.fbc) {
+        foundClickIds.fbc = fbcValue;
+        setClickId('fbc', fbcValue);
+        setFirstTouchClickId('fbc', fbcValue);
       }
     }
 
@@ -665,14 +708,23 @@
   if (!window.lr) window.lr = {};
   window.lr._q = [];
   window.lr.track = trackCustomEvent;
-  window.lr.identify = function(userId) { setUserId(userId); };
+  window.lr.identify = function(userId) {
+    setUserId(userId);
+    var payload = buildPayload('identify', 'identify', null);
+    send(payload);
+  };
   window.lr._version = '0.1.8';
 
   // Replay queued events
   if (existingQueue.length) log('Replaying ' + existingQueue.length + ' queued event(s)');
   for (var qi = 0; qi < existingQueue.length; qi++) {
     try {
-      trackCustomEvent.apply(null, existingQueue[qi]);
+      var queued = existingQueue[qi];
+      if (queued[0] === '__identify') {
+        window.lr.identify(queued[1]);
+      } else {
+        trackCustomEvent.apply(null, queued);
+      }
     } catch (e) { logError('Failed to replay queued event', e); }
   }
 
