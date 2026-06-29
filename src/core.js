@@ -41,7 +41,12 @@
   // CONSTANTS
   // ============================================================
 
-  var UTM_KEYS = ['utm_source', 'utm_medium', 'utm_campaign', 'utm_term', 'utm_content'];
+  // utm_id is the stable per-campaign identifier (e.g. Meta's {{campaign.id}} in
+  // its default URL template) — the web analogue of an app campaign's display_id.
+  // Including it here persists it last-touch (sessionStorage) + first-touch
+  // (localStorage, as ft_utm_id) and ships both on every event, so the dashboard
+  // can group a campaign's links by utm_id even after the landing page view.
+  var UTM_KEYS = ['utm_source', 'utm_medium', 'utm_campaign', 'utm_id', 'utm_term', 'utm_content'];
 
   var CLICK_ID_KEYS = [
     'gclid', 'gbraid', 'wbraid', 'fbclid', 'fbc', 'fbp',
@@ -713,7 +718,7 @@
     var payload = buildPayload('identify', 'identify', null);
     send(payload);
   };
-  window.lr._version = '0.1.9';
+  window.lr._version = '0.1.10';
 
   // Replay queued events
   if (existingQueue.length) log('Replaying ' + existingQueue.length + ' queued event(s)');
