@@ -167,6 +167,35 @@ lr.identify('user_123')
 
 Call `identify` once the user logs in or is otherwise known. The user ID is persisted in `localStorage` and included in all subsequent events as `user_id`.
 
+### Track a signup with identity traits
+
+To show a signed-up user's name, email address, and phone number in the **Users** table in the Linkrunner Web Events dashboard, identify the user and then track their signup. `identify` associates the events with your internal user ID; the `signup` event carries the identity traits.
+
+```js
+import { lr } from '@linkrunner/web'
+
+lr.identify(String(user.id)) // Use a stable, non-PII internal ID
+
+lr.track('signup', {
+  name: user.name,
+  email: user.email,
+  phone: user.phone,
+})
+```
+
+Call these after the signup succeeds. You can provide `first_name` and `last_name` instead of `name`:
+
+```js
+lr.track('signup', {
+  first_name: user.firstName,
+  last_name: user.lastName,
+  email: user.email,
+  phone: user.phone,
+})
+```
+
+Only send identity traits when you have the appropriate permission to do so. Previously captured anonymous events are not backfilled.
+
 ## Custom events
 
 ```js
