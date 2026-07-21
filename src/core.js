@@ -394,7 +394,10 @@
       if (medium === 'email' || medium === 'e-mail') {
         return { type: 'email', name: utms.utm_source || 'email' };
       }
-      if (medium === 'social' || medium === 'social-media' || medium === 'paid_social' || medium === 'paidsocial') {
+      if (medium === 'paid_social' || medium === 'paidsocial') {
+        return { type: 'paid_social', name: utms.utm_source || 'unknown' };
+      }
+      if (medium === 'social' || medium === 'social-media') {
         return { type: 'social', name: utms.utm_source || 'unknown' };
       }
       if (medium === 'affiliate') {
