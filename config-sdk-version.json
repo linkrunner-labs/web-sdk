@@ -1,0 +1,74 @@
+{
+  "sdk": "WEB",
+  "package": "web-sdk",
+  "latest_version": "0.1.11",
+  "total_versions": 12,
+  "source": "npm publish dates and CHANGELOG.md. NOTE: this SDK has no rows in Postgres public.\"SDKVersion\", so descriptions are null where the changelog does not cover a release.",
+  "version_source": {
+    "file": "package.json",
+    "type": "package_json"
+  },
+  "version_mirrors": [],
+  "sdk_versions": [
+    {
+      "version": "0.1.11",
+      "pushed_date": "2026-07-15",
+      "description": null
+    },
+    {
+      "version": "0.1.10",
+      "pushed_date": "2026-06-29",
+      "description": null
+    },
+    {
+      "version": "0.1.9",
+      "pushed_date": "2026-04-15",
+      "description": null
+    },
+    {
+      "version": "0.1.8",
+      "pushed_date": "2026-03-25",
+      "description": null
+    },
+    {
+      "version": "0.1.7",
+      "pushed_date": "2026-03-25",
+      "description": null
+    },
+    {
+      "version": "0.1.6",
+      "pushed_date": "2026-03-24",
+      "description": null
+    },
+    {
+      "version": "0.1.5",
+      "pushed_date": "2026-03-23",
+      "description": null
+    },
+    {
+      "version": "0.1.4",
+      "pushed_date": "2026-03-20",
+      "description": null
+    },
+    {
+      "version": "0.1.3",
+      "pushed_date": "2026-03-20",
+      "description": null
+    },
+    {
+      "version": "0.1.2",
+      "pushed_date": "2026-03-20",
+      "description": null
+    },
+    {
+      "version": "0.1.1",
+      "pushed_date": "2026-03-20",
+      "description": null
+    },
+    {
+      "version": "0.1.0",
+      "pushed_date": "2026-03-20",
+      "description": null
+    }
+  ]
+}
