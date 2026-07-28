@@ -28,7 +28,8 @@
     "dev": "npm run build && cd test-app && npm run dev",
     "dev:watch": "npx concurrently \"tsup src/index.ts src/next.tsx --format esm,cjs --dts --out-dir dist --external next --external react --watch\" \"cd test-app && npm run dev\"",
     "test:link": "npm run build && npm link && cd test-app && npm link @linkrunner/web && npm run dev",
-    "prepublishOnly": "npm run build"
+    "prepublishOnly": "npm run check:version && npm run build",
+    "check:version": "node scripts/check-sdk-version.js"
   },
   "devDependencies": {
     "@types/react": "^18.2.0",
