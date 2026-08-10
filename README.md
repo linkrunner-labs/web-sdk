@@ -6,6 +6,7 @@ Web attribution SDK for [Linkrunner](https://linkrunner.io) — track page views
 
 - Automatic page view tracking (including SPA navigation)
 - First-touch and last-touch UTM attribution
+- Last-touch UTMs survive payment gateway redirects and tab loss for 24 hours
 - Click ID persistence (gclid, fbclid, ttclid, etc.) with 90-day TTL
 - Traffic source classification (paid, organic, social, AI search, referral, direct)
 - AI search engine detection (ChatGPT, Perplexity, Claude, Gemini, and more)
@@ -206,6 +207,23 @@ lr.track('event_name', { key: 'value' })
 ```
 
 Events can be queued before the script loads — they'll be replayed automatically once initialized.
+
+## Attribution storage
+
+| What                                                              | Where                                   | Lifetime                     |
+| ----------------------------------------------------------------- | --------------------------------------- | ---------------------------- |
+| First-touch UTMs and click IDs (`ft_*`)                            | `localStorage`                          | Until storage is cleared     |
+| Last-touch click IDs (`gclid`, `fbclid`, …)                        | `localStorage`                          | 90 days                      |
+| Last-touch UTMs (`utm_source`, `utm_campaign`, `utm_id`, …)        | `sessionStorage` + `localStorage` (`lr_lt`) | 24 hours from the campaign click |
+| Visitor ID, user ID                                                | `localStorage`                          | Until storage is cleared     |
+| Session ID, session page count, entry page                         | `sessionStorage`                        | Tab session                  |
+
+Last-touch UTMs are mirrored into `localStorage` because `sessionStorage` is per tab.
+A payment gateway (or a bank 3DS page) that returns the visitor in a fresh tab would
+otherwise drop every `utm_*` value, so the purchase arrives with no campaign attached
+even though the click IDs still identify the network. The mirrored copy is replaced
+whenever a URL carries new UTMs, dropped when a URL carries a new click ID with no UTMs,
+and expires 24 hours after the campaign click. First-touch values are never affected.
 
 ## Traffic source detection
 

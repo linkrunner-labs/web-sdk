@@ -27,6 +27,7 @@
     "build": "npm run build:ts && npm run build:core",
     "dev": "npm run build && cd test-app && npm run dev",
     "dev:watch": "npx concurrently \"tsup src/index.ts src/next.tsx --format esm,cjs --dts --out-dir dist --external next --external react --watch\" \"cd test-app && npm run dev\"",
+    "test": "node --test",
     "test:link": "npm run build && npm link && cd test-app && npm link @linkrunner/web && npm run dev",
     "prepublishOnly": "npm run build"
   },
