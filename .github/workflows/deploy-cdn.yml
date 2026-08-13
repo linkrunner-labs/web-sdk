@@ -160,26 +160,42 @@ jobs:
           min_updated=false
           rollback_aliases() {
             local status=$?
+            local rollback_failed=false
             trap - ERR
             if [[ "$min_updated" == true ]]; then
               local min_current_generation
               min_current_generation="$(gcloud storage objects describe "$min_path" --format='value(generation)')"
               if test "$(sha256sum dist/lr.min.js | cut -d' ' -f1)" = "$(gcloud storage cat "${min_path}#${min_current_generation}" | sha256sum | cut -d' ' -f1)"; then
-                gcloud storage cp /tmp/lr.min.js.previous "$min_path" \
+                if ! gcloud storage cp /tmp/lr.min.js.previous "$min_path" \
                   --content-type="application/javascript" \
                   --cache-control="public,max-age=0,must-revalidate" \
-                  --if-generation-match="$min_current_generation" || true
+                  --if-generation-match="$min_current_generation"; then
+                  rollback_failed=true
+                elif ! test "$(sha256sum /tmp/lr.min.js.previous | cut -d' ' -f1)" = "$(gcloud storage cat "$min_path" | sha256sum | cut -d' ' -f1)"; then
+                  rollback_failed=true
+                fi
+              else
+                rollback_failed=true
               fi
             fi
             if [[ "$lr_updated" == true ]]; then
               local lr_current_generation
               lr_current_generation="$(gcloud storage objects describe "$lr_path" --format='value(generation)')"
               if test "$(sha256sum dist/lr.js | cut -d' ' -f1)" = "$(gcloud storage cat "${lr_path}#${lr_current_generation}" | sha256sum | cut -d' ' -f1)"; then
-                gcloud storage cp /tmp/lr.js.previous "$lr_path" \
+                if ! gcloud storage cp /tmp/lr.js.previous "$lr_path" \
                   --content-type="application/javascript" \
                   --cache-control="public,max-age=0,must-revalidate" \
-                  --if-generation-match="$lr_current_generation" || true
+                  --if-generation-match="$lr_current_generation"; then
+                  rollback_failed=true
+                elif ! test "$(sha256sum /tmp/lr.js.previous | cut -d' ' -f1)" = "$(gcloud storage cat "$lr_path" | sha256sum | cut -d' ' -f1)"; then
+                  rollback_failed=true
+                fi
+              else
+                rollback_failed=true
               fi
+            fi
+            if [[ "$rollback_failed" == true ]]; then
+              echo "::error::Hosted v1 alias rollback was incomplete; inspect both objects before retrying deployment"
             fi
             exit "$status"
           }
