@@ -35,8 +35,10 @@ jobs:
         run: |
           set -euo pipefail
           version="$(node -p "require('./package.json').version")"
+          lock_root_version="$(node -p "require('./package-lock.json').version")"
           lock_version="$(node -p "require('./package-lock.json').packages[''].version")"
           [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          test "$lock_root_version" = "$version"
           test "$lock_version" = "$version"
           VERSION="$version" node <<'NODE'
           const fs = require('fs');
@@ -62,7 +64,7 @@ jobs:
           retention-days: 1
 
   deploy:
-    if: github.event_name != 'pull_request'
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
     needs: build
     runs-on: ubuntu-latest
     permissions:
@@ -115,9 +117,10 @@ jobs:
           set -euo pipefail
           upload_immutable() {
             local source="$1" destination="$2"
-            local expected actual
+            local expected actual generation
             expected="$(sha256sum "$source" | cut -d' ' -f1)"
-            if gcloud storage cat "$destination" > /tmp/existing-sdk 2>/dev/null; then
+            if generation="$(gcloud storage objects describe "$destination" --format='value(generation)' 2>/dev/null)"; then
+              gcloud storage cat "${destination}#${generation}" > /tmp/existing-sdk
               actual="$(sha256sum /tmp/existing-sdk | cut -d' ' -f1)"
               test "$actual" = "$expected" || {
                 echo "Refusing to overwrite immutable artifact $destination" >&2
@@ -125,7 +128,8 @@ jobs:
               }
               gcloud storage objects update "$destination" \
                 --content-type="application/javascript" \
-                --cache-control="public,max-age=31536000,immutable"
+                --cache-control="public,max-age=31536000,immutable" \
+                --if-generation-match="$generation"
               echo "$destination already contains the expected artifact; metadata verified"
             else
               gcloud storage cp "$source" "$destination" \
@@ -138,6 +142,9 @@ jobs:
           upload_immutable dist/lr.js "gs://${CDN_BUCKET}/web/v${VERSION}/lr.js"
           upload_immutable dist/lr.min.js "gs://${CDN_BUCKET}/web/v${VERSION}/lr.min.js"
 
+          test "$(sha256sum dist/lr.js | cut -d' ' -f1)" = "$(gcloud storage cat "gs://${CDN_BUCKET}/web/v${VERSION}/lr.js" | sha256sum | cut -d' ' -f1)"
+          test "$(sha256sum dist/lr.min.js | cut -d' ' -f1)" = "$(gcloud storage cat "gs://${CDN_BUCKET}/web/v${VERSION}/lr.min.js" | sha256sum | cut -d' ' -f1)"
+
       - name: Atomically advance hosted v1 aliases
         run: |
           set -euo pipefail
@@ -146,29 +153,33 @@ jobs:
           min_path="gs://${CDN_BUCKET}/web/v1/lr.min.js"
           lr_old_generation="$(gcloud storage objects describe "$lr_path" --format='value(generation)')"
           min_old_generation="$(gcloud storage objects describe "$min_path" --format='value(generation)')"
-          gcloud storage cat "$lr_path" > /tmp/lr.js.previous
-          gcloud storage cat "$min_path" > /tmp/lr.min.js.previous
+          gcloud storage cat "${lr_path}#${lr_old_generation}" > /tmp/lr.js.previous
+          gcloud storage cat "${min_path}#${min_old_generation}" > /tmp/lr.min.js.previous
 
           lr_updated=false
           min_updated=false
           rollback_aliases() {
             local status=$?
             trap - ERR
-            if [[ "$min_updated" == true ]] && test "$(sha256sum dist/lr.min.js | cut -d' ' -f1)" = "$(gcloud storage cat "$min_path" | sha256sum | cut -d' ' -f1)"; then
+            if [[ "$min_updated" == true ]]; then
               local min_current_generation
               min_current_generation="$(gcloud storage objects describe "$min_path" --format='value(generation)')"
-              gcloud storage cp /tmp/lr.min.js.previous "$min_path" \
-                --content-type="application/javascript" \
-                --cache-control="public,max-age=0,must-revalidate" \
-                --if-generation-match="$min_current_generation" || true
+              if test "$(sha256sum dist/lr.min.js | cut -d' ' -f1)" = "$(gcloud storage cat "${min_path}#${min_current_generation}" | sha256sum | cut -d' ' -f1)"; then
+                gcloud storage cp /tmp/lr.min.js.previous "$min_path" \
+                  --content-type="application/javascript" \
+                  --cache-control="public,max-age=0,must-revalidate" \
+                  --if-generation-match="$min_current_generation" || true
+              fi
             fi
-            if [[ "$lr_updated" == true ]] && test "$(sha256sum dist/lr.js | cut -d' ' -f1)" = "$(gcloud storage cat "$lr_path" | sha256sum | cut -d' ' -f1)"; then
+            if [[ "$lr_updated" == true ]]; then
               local lr_current_generation
               lr_current_generation="$(gcloud storage objects describe "$lr_path" --format='value(generation)')"
-              gcloud storage cp /tmp/lr.js.previous "$lr_path" \
-                --content-type="application/javascript" \
-                --cache-control="public,max-age=0,must-revalidate" \
-                --if-generation-match="$lr_current_generation" || true
+              if test "$(sha256sum dist/lr.js | cut -d' ' -f1)" = "$(gcloud storage cat "${lr_path}#${lr_current_generation}" | sha256sum | cut -d' ' -f1)"; then
+                gcloud storage cp /tmp/lr.js.previous "$lr_path" \
+                  --content-type="application/javascript" \
+                  --cache-control="public,max-age=0,must-revalidate" \
+                  --if-generation-match="$lr_current_generation" || true
+              fi
             fi
             exit "$status"
           }
@@ -189,13 +200,3 @@ jobs:
           test "$(sha256sum dist/lr.js | cut -d' ' -f1)" = "$(gcloud storage cat "$lr_path" | sha256sum | cut -d' ' -f1)"
           test "$(sha256sum dist/lr.min.js | cut -d' ' -f1)" = "$(gcloud storage cat "$min_path" | sha256sum | cut -d' ' -f1)"
           trap - ERR
-
-      - name: Verify immutable artifacts
-        env:
-          VERSION: ${{ steps.version.outputs.version }}
-        run: |
-          set -euo pipefail
-          local_lr="$(sha256sum dist/lr.js | cut -d' ' -f1)"
-          local_min="$(sha256sum dist/lr.min.js | cut -d' ' -f1)"
-          test "$local_lr" = "$(gcloud storage cat "gs://${CDN_BUCKET}/web/v${VERSION}/lr.js" | sha256sum | cut -d' ' -f1)"
-          test "$local_min" = "$(gcloud storage cat "gs://${CDN_BUCKET}/web/v${VERSION}/lr.min.js" | sha256sum | cut -d' ' -f1)"
