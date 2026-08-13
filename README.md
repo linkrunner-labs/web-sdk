@@ -225,6 +225,20 @@ even though the click IDs still identify the network. The mirrored copy is repla
 whenever a URL carries new UTMs, dropped when a URL carries a new click ID with no UTMs,
 and expires 24 hours after the campaign click. First-touch values are never affected.
 
+Two consequences of the `localStorage` mirror worth knowing:
+
+**Last-touch UTMs are device-scoped, not tab-scoped.** `localStorage` is shared across
+tabs while `sessionStorage` is not, so when a visitor opens two campaigns in two tabs,
+both tabs report the most recent one. This matches how last-touch click IDs already
+behave (they have always been device-scoped with a 90-day lifetime), so the campaign and
+the traffic source now agree instead of disagreeing per tab.
+
+**A tab left open longer than 24 hours loses its UTMs.** Expiry clears the
+`sessionStorage` mirror too, so the window means the same thing whether or not the tab
+survived. This is deliberate — a campaign should not take credit for a visit a day later
+— but it is narrower than the previous behaviour, where a `sessionStorage` value lived
+as long as the tab did. Click IDs are unaffected, so the traffic source still resolves.
+
 ## Traffic source detection
 
 The SDK automatically classifies traffic into these source types:
