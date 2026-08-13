@@ -361,3 +361,46 @@ test('a visitor with no campaign history is unaffected', function () {
   assert.strictEqual(view.traffic_source_type, 'organic_search');
   assert.strictEqual(view.traffic_source_name, 'google');
 });
+
+// A record is only ever written by setLastTouchUtms, so a missing stamp means the
+// shape changed under us — a partial write, a hand-edited key, or an older/newer
+// SDK that wrote a different record. The TTL is the only thing bounding how long a
+// campaign keeps credit, and `Date.now() - undefined` is NaN, so without this guard
+// an unstamped record outlives every window silently.
+test('a record with no timestamp is discarded, not treated as fresh', function () {
+    var clock = createClock();
+    var localStorage = createStorage({
+        lr_lt: JSON.stringify({ u: { utm_source: 'meta', utm_campaign: 'unstamped' } }),
+    });
+
+    clock.advance(90 * 24 * HOUR);
+
+    var view = loadSdk({
+        url: GATEWAY_RETURN_URL,
+        referrer: GATEWAY_REFERRER,
+        clock: clock,
+        localStorage: localStorage,
+        sessionStorage: createStorage(),
+    }).pageView();
+
+    assert.strictEqual(view.utm_campaign, '');
+    assert.strictEqual(view.utm_source, '');
+    assert.strictEqual(localStorage.getItem('lr_lt'), null);
+});
+
+test('a record with a non-numeric timestamp is discarded', function () {
+    var localStorage = createStorage({
+        lr_lt: JSON.stringify({ u: { utm_campaign: 'bad_stamp' }, t: 'not-a-number' }),
+    });
+
+    var view = loadSdk({
+        url: GATEWAY_RETURN_URL,
+        referrer: GATEWAY_REFERRER,
+        clock: createClock(),
+        localStorage: localStorage,
+        sessionStorage: createStorage(),
+    }).pageView();
+
+    assert.strictEqual(view.utm_campaign, '');
+    assert.strictEqual(localStorage.getItem('lr_lt'), null);
+});

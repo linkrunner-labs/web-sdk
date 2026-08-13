@@ -294,6 +294,15 @@
     try {
       var record = JSON.parse(raw);
       if (!record || !record.u) return null;
+      // A record with no usable stamp can never expire: Date.now() - undefined is
+      // NaN, and NaN > TTL is false, so the window below would be skipped forever.
+      // Treat it as expired instead — the TTL is the only thing keeping a campaign
+      // from being credited indefinitely.
+      if (typeof record.t !== 'number' || !isFinite(record.t)) {
+        log('Last-touch UTM record has no valid timestamp — discarding', record.u);
+        clearLastTouchUtms();
+        return null;
+      }
       if (Date.now() - record.t > LAST_TOUCH_TTL_MS) {
         log('Last-touch UTMs expired', record.u);
         clearLastTouchUtms();
