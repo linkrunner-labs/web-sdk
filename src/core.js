@@ -37,6 +37,12 @@
 
   var CLICK_ID_TTL_MS = 90 * 24 * 60 * 60 * 1000; // 90 days
 
+  // Last-touch UTMs get a much shorter life than click IDs: 24 hours from the campaign
+  // click. Long enough for a payment gateway round trip and a browse-then-buy journey
+  // that outlives the tab, short enough that a campaign is never credited for a visit
+  // days later — and well inside every ad platform's click-through window.
+  var LAST_TOUCH_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours since the campaign click
+
   // ============================================================
   // CONSTANTS
   // ============================================================
@@ -258,8 +264,15 @@
   }
 
   // ============================================================
-  // UTM PERSISTENCE (sessionStorage for last-touch, localStorage for first-touch)
+  // UTM PERSISTENCE (sessionStorage + short-lived localStorage record for
+  // last-touch, localStorage for first-touch)
   // ============================================================
+
+  // Last-touch UTMs are mirrored into a stamped localStorage record (lr_lt) as well as
+  // sessionStorage, because sessionStorage is per tab: a payment gateway that returns
+  // the visitor in a fresh tab wipes it, and the purchase lands with empty campaign
+  // fields even though the click IDs (90-day localStorage) still say "meta". The record
+  // is deliberately short-lived — see LAST_TOUCH_TTL_MS.
 
   function setFirstTouchUtm(key, value) {
     var ftKey = 'lr_ft_' + key;
@@ -272,6 +285,54 @@
     return safeGet(localStorage, 'lr_ft_' + key) || '';
   }
 
+  // Returns the stored last-touch record, or null when it is absent or expired. An
+  // expired record clears the sessionStorage mirror as well, so the window means the
+  // same thing whether or not the visitor's tab survived.
+  function getLastTouchRecord() {
+    var raw = safeGet(localStorage, 'lr_lt');
+    if (!raw) return null;
+    try {
+      var record = JSON.parse(raw);
+      if (!record || !record.u) return null;
+      // A record with no usable stamp can never expire: Date.now() - undefined is
+      // NaN, and NaN > TTL is false, so the window below would be skipped forever.
+      // Treat it as expired instead — the TTL is the only thing keeping a campaign
+      // from being credited indefinitely.
+      if (typeof record.t !== 'number' || !isFinite(record.t)) {
+        log('Last-touch UTM record has no valid timestamp — discarding', record.u);
+        clearLastTouchUtms();
+        return null;
+      }
+      if (Date.now() - record.t > LAST_TOUCH_TTL_MS) {
+        log('Last-touch UTMs expired', record.u);
+        clearLastTouchUtms();
+        return null;
+      }
+      return record;
+    } catch (e) { logError('Failed to parse last-touch UTM record', e); return null; }
+  }
+
+  // Replaces the stored set wholesale — a campaign link carrying fewer params must not
+  // inherit leftover fields from the previous campaign.
+  function setLastTouchUtms(utms) {
+    for (var i = 0; i < UTM_KEYS.length; i++) {
+      var key = UTM_KEYS[i];
+      if (utms[key]) {
+        safeSet(sessionStorage, 'lr_' + key, utms[key]);
+      } else {
+        safeRemove(sessionStorage, 'lr_' + key);
+      }
+    }
+    safeSet(localStorage, 'lr_lt', JSON.stringify({ u: utms, t: Date.now() }));
+  }
+
+  function clearLastTouchUtms() {
+    for (var i = 0; i < UTM_KEYS.length; i++) {
+      safeRemove(sessionStorage, 'lr_' + UTM_KEYS[i]);
+    }
+    safeRemove(localStorage, 'lr_lt');
+  }
+
   // ============================================================
   // PARAMETER PERSISTENCE — extract from URL, persist to storage
   // ============================================================
@@ -280,13 +341,13 @@
     var params = getQueryParams();
     var foundUtms = {};
     var foundClickIds = {};
+    var newClickIdInUrl = false;
 
-    // UTMs → sessionStorage (last-touch, per session)
+    // UTMs → first-touch here, last-touch below (written as one set)
     for (var i = 0; i < UTM_KEYS.length; i++) {
       var key = UTM_KEYS[i];
       if (params[key]) {
         foundUtms[key] = params[key];
-        safeSet(sessionStorage, 'lr_' + key, params[key]);
         setFirstTouchUtm(key, params[key]);
       }
     }
@@ -295,6 +356,7 @@
     for (var j = 0; j < CLICK_ID_KEYS.length; j++) {
       var cidKey = CLICK_ID_KEYS[j];
       if (params[cidKey]) {
+        if (params[cidKey] !== getClickId(cidKey)) newClickIdInUrl = true;
         foundClickIds[cidKey] = params[cidKey];
         setClickId(cidKey, params[cidKey]);
         setFirstTouchClickId(cidKey, params[cidKey]);
@@ -330,15 +392,30 @@
       }
     }
 
-    if (Object.keys(foundUtms).length) log('UTM params found', foundUtms);
+    // Only an arrival that actually carries campaign params rewrites last-touch state.
+    // Navigation with no campaign params — a payment gateway sending the visitor back —
+    // leaves the stored set alone, which is what keeps attribution across the redirect.
+    if (Object.keys(foundUtms).length) {
+      setLastTouchUtms(foundUtms);
+      log('UTM params found', foundUtms);
+    } else if (newClickIdInUrl) {
+      // A new click that carries no UTMs is still a new touch: drop the previous
+      // campaign's UTMs rather than crediting them to this click.
+      clearLastTouchUtms();
+    }
+
     if (Object.keys(foundClickIds).length) log('Click IDs found', foundClickIds);
   }
 
+  // The stamped record wins as a complete set while it is valid; otherwise we fall back
+  // to sessionStorage, which keeps visitors who upgrade mid-session — and visitors whose
+  // localStorage is unavailable — on the pre-existing behaviour.
   function getPersistedUtms() {
+    var record = getLastTouchRecord();
     var utms = {};
     for (var i = 0; i < UTM_KEYS.length; i++) {
       var key = UTM_KEYS[i];
-      utms[key] = safeGet(sessionStorage, 'lr_' + key) || '';
+      utms[key] = (record ? record.u[key] : safeGet(sessionStorage, 'lr_' + key)) || '';
     }
     return utms;
   }
@@ -718,7 +795,7 @@
     var payload = buildPayload('identify', 'identify', null);
     send(payload);
   };
-  window.lr._version = '0.1.10';
+  window.lr._version = '0.1.12';
 
   // Replay queued events
   if (existingQueue.length) log('Replaying ' + existingQueue.length + ' queued event(s)');
