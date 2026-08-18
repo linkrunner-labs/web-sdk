@@ -35,7 +35,37 @@
     } catch (e) { return false; }
   })();
 
-  var CLICK_ID_TTL_MS = 90 * 24 * 60 * 60 * 1000; // 90 days
+  // A stored click ID must never outlive the network's OWN click-through
+  // attribution window. Past that the network stops counting the conversion, so
+  // any credit we keep awarding can never be reconciled against the advertiser's
+  // dashboard. Measured case: a Meta click from 23 June was still being replayed
+  // on 14 August — 52 days later — and credited to Meta, which Meta itself had
+  // long stopped counting.
+  /** Shared with the npm stub in `index.ts`, which writes it. */
+  var LANDING_SNAPSHOT_KEY = 'lr_snap';
+
+  var CLICK_ID_TTL_MS = 90 * 24 * 60 * 60 * 1000; // 90 days (default)
+
+  // Meta counts a conversion only within 7 days of the click, so that is the
+  // longest its click ID may keep earning credit.
+  var META_CLICK_WINDOW_MS = 7 * 24 * 60 * 60 * 1000;
+
+  // Per-network overrides of CLICK_ID_TTL_MS. Only networks whose real window has
+  // been verified are listed; everything else keeps the 90-day default rather than
+  // being tightened on a guess, since shortening a window silently drops credit.
+  // `fbp` is deliberately absent: it is a browser identifier for Meta's
+  // Conversions API, not a click, and has no attribution window.
+  var CLICK_ID_TTL_BY_KEY = {
+    fbclid: META_CLICK_WINDOW_MS,
+    fbc: META_CLICK_WINDOW_MS
+  };
+
+  // Earliest plausible click timestamp. Anything older is a malformed value, not
+  // a very old click, and is discarded rather than trusted as evidence.
+  var MIN_PLAUSIBLE_CLICK_MS = Date.UTC(2015, 0, 1);
+
+  // Tolerance for a client clock that runs ahead of real time.
+  var MAX_CLOCK_SKEW_MS = 24 * 60 * 60 * 1000;
 
   // Last-touch UTMs get a much shorter life than click IDs: 24 hours from the campaign
   // click. Long enough for a payment gateway round trip and a browse-then-buy journey
@@ -143,10 +173,38 @@
     }
   }
 
+  /**
+   * The URL and referrer the visitor actually landed on, recorded synchronously
+   * by the npm stub (`index.ts`) at module-evaluation time — before hydration,
+   * and well before an `afterInteractive` script tag executes.
+   *
+   * This script reads the URL exactly once, when it runs. If it runs late and the
+   * visitor has already navigated on, the live URL carries no campaign at all;
+   * the snapshot is the only surviving record of the landing. Returns null when
+   * the stub is not in use (plain script-tag installs) or storage is unavailable.
+   */
+  function getLandingSnapshot() {
+    try {
+      var raw = safeGet(sessionStorage, LANDING_SNAPSHOT_KEY);
+      if (!raw) return null;
+      var snap = JSON.parse(raw);
+      return snap && typeof snap.search === 'string' ? snap : null;
+    } catch (e) { logError('Failed to parse landing snapshot', e); return null; }
+  }
+
   function getQueryParams() {
     var params = {};
     try {
       var search = window.location.search.substring(1);
+      // Only fall back when the live URL has nothing: if it still carries
+      // parameters they are the current truth and must win.
+      if (!search) {
+        var snap = getLandingSnapshot();
+        if (snap && snap.search) {
+          search = snap.search.charAt(0) === '?' ? snap.search.substring(1) : snap.search;
+          log('Recovered landing params from the pre-hydration snapshot');
+        }
+      }
       if (!search) return params;
       var pairs = search.split('&');
       for (var i = 0; i < pairs.length; i++) {
@@ -225,11 +283,15 @@
   }
 
   // ============================================================
-  // CLICK ID PERSISTENCE (localStorage, 90-day TTL)
+  // CLICK ID PERSISTENCE (localStorage, per-network TTL)
   // ============================================================
 
   function setClickId(key, value) {
     safeSet(localStorage, 'lr_' + key, JSON.stringify({ v: value, t: Date.now() }));
+  }
+
+  function clickIdTtl(key) {
+    return CLICK_ID_TTL_BY_KEY[key] || CLICK_ID_TTL_MS;
   }
 
   function getClickId(key) {
@@ -237,7 +299,7 @@
       var raw = safeGet(localStorage, 'lr_' + key);
       if (!raw) return '';
       var parsed = JSON.parse(raw);
-      if (Date.now() - parsed.t > CLICK_ID_TTL_MS) {
+      if (Date.now() - parsed.t > clickIdTtl(key)) {
         safeRemove(localStorage, 'lr_' + key);
         return '';
       }
@@ -450,7 +512,15 @@
 
   function classifyTrafficSource(clickIds, utms, referringDomain) {
     // 1. Click ID based (paid traffic)
+    //
+    // Order is significant: another network's click ID is checked FIRST, so a
+    // genuine later paid click always outranks the Meta cookie under last touch.
     if (clickIds.gclid || clickIds.gbraid || clickIds.wbraid) return { type: 'paid_search', name: 'google' };
+    // Deliberately `fbclid` only, never `fbc`. Unlike `gclid`, Facebook appends
+    // `fbclid` to outbound clicks from its properties generally — organic posts,
+    // shares, link-in-bio, the in-app browser — and `_fbc` is just the pixel's
+    // persisted copy of the same value. Neither can separate paid from organic,
+    // and `type` is the field that draws that line.
     if (clickIds.fbclid) return { type: 'paid_social', name: 'meta' };
     if (clickIds.msclkid) return { type: 'paid_search', name: 'microsoft' };
     if (clickIds.ttclid) return { type: 'paid_social', name: 'tiktok' };
@@ -607,7 +677,9 @@
   function buildPayload(eventType, eventName, eventData) {
     var utms = getPersistedUtms();
     var clickIds = getPersistedClickIds();
-    var referringDomain = getReferringDomain(document.referrer);
+    var landingSnapshot = getLandingSnapshot();
+    var referrer = document.referrer || (landingSnapshot && landingSnapshot.referrer) || '';
+    var referringDomain = getReferringDomain(referrer);
     var trafficSource = classifyTrafficSource(clickIds, utms, referringDomain);
     setFirstTouchTrafficSource(trafficSource);
 
@@ -620,7 +692,8 @@
 
     // Set entry page on first page of session
     if (count <= 1 && eventType === 'page_view') {
-      safeSet(sessionStorage, 'lr_entry', location.href);
+      var entrySnapshot = getLandingSnapshot();
+      safeSet(sessionStorage, 'lr_entry', (entrySnapshot && entrySnapshot.href) || location.href);
     }
 
     var payload = {
@@ -814,7 +887,29 @@
   // INITIALIZATION
   // ============================================================
 
-  log('Initialized', { token: TOKEN.slice(0, 8) + '...', endpoint: COLLECT_ENDPOINT, spa: SPA_ENABLED });
+  log('Initialized', {
+    token: TOKEN.slice(0, 8) + '...',
+    endpoint: COLLECT_ENDPOINT,
+    spa: SPA_ENABLED,
+    readyState: document.readyState
+  });
+
+  // `readyState === 'loading'` means this script ran while the document was still
+  // parsing, i.e. it won the race against the app's own router. Anything else
+  // means it ran after the DOM was built, and a visitor who has already tapped
+  // through will have taken the campaign parameters with them.
+  //
+  // Worth surfacing because the usual remedy — Next.js
+  // `strategy="beforeInteractive"` — only takes effect in the App Router root
+  // layout or the Pages Router `_document`. Anywhere else it silently degrades to
+  // a late client-side load, which LOOKS fixed. This line is how you tell.
+  if (document.readyState !== 'loading') {
+    log(
+      'Loaded after the document was parsed (readyState=' + document.readyState + '). ' +
+      'Campaign parameters can be missed if the visitor navigates before this runs — ' +
+      'load the SDK before hydration to avoid it.'
+    );
+  }
 
   expireOldClickIds();
   persistParams();
