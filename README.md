@@ -222,15 +222,27 @@ lr.your-domain.com.  CNAME  api.linkrunner.io.
 ```
 
 We issue the certificate automatically on first request — only for subdomains
-registered against your project — and serve both routes from it:
+registered against your project — and serve both routes from it.
+
+**Change one attribute.** Point `src` at your subdomain and the endpoint follows
+it automatically: we serve the collector from the same host, so there is nothing
+to keep in sync and no way to move the script first-party while leaving the
+beacon behind.
 
 ```html
 <script
   src="https://lr.your-domain.com/web/v1/lr.js"
   data-token="YOUR_PROJECT_TOKEN"
-  data-endpoint="https://lr.your-domain.com/web/ingest"
 ></script>
 ```
+
+For Next.js, the same single change:
+
+```tsx
+<LinkrunnerScript token="YOUR_PROJECT_TOKEN" scriptSrc="https://lr.your-domain.com/web/v1/lr.js" />
+```
+
+`data-endpoint` still overrides it if you want the two split.
 
 Nothing to deploy, nothing to keep working, and the visitor's IP arrives exactly
 right because there is no proxy of yours in the path to lose it.

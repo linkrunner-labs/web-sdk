@@ -75,6 +75,7 @@ function loadSdk(options) {
 
   var parsed = new URL(url);
   var sent = [];
+  var sentTo = [];
   var timers = [];
 
   var sandbox = {
@@ -86,7 +87,9 @@ function loadSdk(options) {
       hostname: parsed.hostname,
     },
     document: {
-      currentScript: null,
+      // options.scriptSrc simulates the <script src> the SDK was loaded from,
+      // which is what endpoint derivation reads.
+      currentScript: options.scriptSrc ? { src: options.scriptSrc, getAttribute: function () { return null; } } : null,
       querySelector: function () {
         return null;
       },
@@ -134,6 +137,7 @@ function loadSdk(options) {
     Date: createDateClass(clock),
     fetch: function (endpoint, init) {
       sent.push(JSON.parse(init.body));
+      sentTo.push(endpoint);
       return Promise.resolve({ ok: true, status: 200 });
     },
     setTimeout: function (fn) {
@@ -160,6 +164,8 @@ function loadSdk(options) {
   return {
     sandbox: sandbox,
     sent: sent,
+    // Where the events actually went — the endpoint as resolved, not as configured.
+    sentTo: sentTo,
     clock: clock,
     localStorage: localStorage,
     sessionStorage: sessionStorage,
