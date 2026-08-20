@@ -25,13 +25,53 @@
   // running an older cached bundle, so never point this back at it.
   var DEFAULT_ENDPOINT = 'https://api.linkrunner.io/web/ingest';
 
-  // First-party collection is opt-in per customer, through `endpoint` /
-  // `data-endpoint`. Deliberately NO token -> host table baked in here: it would
-  // repoint a customer's traffic on our say-so with no change on their page,
-  // which is fine right until the host is wrong, and it would put customer
-  // identifiers in a public repo. See the README's first-party section.
+  /**
+   * First-party collection endpoints, keyed by write token.
+   *
+   * Moving off '/web/collect' stops a blocklist matching on the word
+   * "collect"; it does nothing about a list entry for our DOMAIN, and those
+   * exist. The only thing that survives one is collecting from a host the site
+   * already owns, so these are subdomains the customer has CNAME'd to
+   * api.linkrunner.io.
+   *
+   * Why a table in the bundle rather than an attribute on the script tag: the
+   * attribute is the better mechanism and it already exists (`data-endpoint`),
+   * but using it means the customer edits their page, and everyone already
+   * integrated keeps sending to the blocked domain until they get round to it.
+   * The table moves them without their doing anything, because the bundle is
+   * served from our CDN behind a `max-age=0, must-revalidate` alias.
+   *
+   * Adding an entry has a hard prerequisite: the host must already answer POST
+   * /web/ingest. A CNAME and a certificate are not enough — the LB hands
+   * unmatched paths to the branded-link handler, which is GET-only and answers
+   * 405 to both the preflight and the POST. Check before shipping an entry:
+   *
+   *   curl -i -X OPTIONS -H 'Origin: https://<site>' \
+   *     -H 'Access-Control-Request-Method: POST' https://<host>/web/ingest
+   *
+   * and expect 204 with access-control-allow-origin. If it is wrong the events
+   * are not lost (see shouldFallBack) but each one costs a doomed round trip.
+   *
+   * This is a stopgap for customers integrated before `data-endpoint` existed.
+   * New integrations get the attribute and stay out of this table.
+   */
+  var FIRST_PARTY_ENDPOINTS = {
+    // Playo, on their existing branded-link host.
+    'lr_web_fyy3R021a1IgsYS7p1CIwJta': 'https://app.playo.co/web/ingest'
+  };
+
+  // typeof-guarded because the token indexes an object literal: a token of
+  // 'constructor' or 'toString' would otherwise resolve up the prototype chain
+  // to a function and be handed to fetch as a URL.
+  var MAPPED_ENDPOINT = typeof FIRST_PARTY_ENDPOINTS[TOKEN] === 'string'
+    ? FIRST_PARTY_ENDPOINTS[TOKEN]
+    : '';
+
+  // An explicit endpoint outranks the table, so a customer in it can still be
+  // moved or reverted from their own page without waiting on a bundle release.
   var COLLECT_ENDPOINT = configObj.endpoint
     || (scriptTag && scriptTag.getAttribute('data-endpoint'))
+    || MAPPED_ENDPOINT
     || DEFAULT_ENDPOINT;
 
   // Payload encryption, off unless a key is configured.
@@ -632,10 +672,9 @@
    *               GET-only; it is what a customer host returns before the
    *               collector route ships.
    *
-   * This is what makes `data-endpoint` safe to set before the routing behind it
-   * is live, and safe to leave set if it ever stops being. Without it, pointing
-   * at a host whose /web/ingest is not serving takes that site's events to zero
-   * with nothing in the payload to say why.
+   * This is what makes an entry in FIRST_PARTY_ENDPOINTS safe to ship ahead of
+   * the routing it depends on. Without it, adding a host whose /web/ingest is
+   * not live yet takes that customer's events to zero.
    *
    * Deliberately NOT 400 or 5xx. Those come from our own backend, which both
    * hosts reach: 400 means it read the payload and rejected it, and the retry

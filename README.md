@@ -95,7 +95,7 @@ Events can be queued before the script loads — they'll be replayed automatical
 | Attribute       | Required | Description                                          | Default                                |
 | --------------- | -------- | ---------------------------------------------------- | -------------------------------------- |
 | `data-token`    | Yes      | Your Linkrunner project token                        | —                                      |
-| `data-endpoint` | No       | Where events are posted. See [First-party collection](#first-party-collection-recommended) | `https://api.linkrunner.io/web/ingest` |
+| `data-endpoint` | No       | Where events are posted. See [First-party collection](#first-party-collection-recommended) | `https://api.linkrunner.io/web/ingest`, or your own subdomain if we have one on file for your token |
 | `data-spa`      | No       | Set to `"false"` to disable SPA mode                 | `true`                                 |
 | `data-debug`    | No       | `"true"` / `"false"` to force debug mode             | Auto                                   |
 
@@ -252,6 +252,14 @@ posting to us directly. Chrome extensions have no DNS API and cannot do it, so
 this still covers most traffic — but **Option 1 covers all of it**, because a
 same-origin path has nothing to uncloak. Pick Option 2 when you cannot ship a
 rewrite, not when you can.
+
+#### If you cannot edit the page at all
+
+Tell us the subdomain and we will ship the mapping inside the bundle, keyed to
+your project token. Nothing on your side changes: the bundle is served behind a
+`max-age=0, must-revalidate` alias, so your pages pick it up on their next load.
+It does not lock you in either — `data-endpoint` still wins over it, so you can
+move or revert yourself later without waiting on a release from us.
 
 #### If a first-party endpoint stops working
 
