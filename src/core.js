@@ -519,6 +519,17 @@
     }
   }
 
+  // Persist last-touch traffic source. The SDK recomputes this per event and never
+  // stored it. That left contexts which can only READ storage, notably a Shopify
+  // custom pixel sandboxed on the checkout page, unable to report the source the
+  // SDK would have sent. Session-scoped to match the lr_utm_* mirror; the lr_lt
+  // record above is what carries last-touch across a fresh-tab return.
+  function setLastTouchTrafficSource(source) {
+    if (!source.type) return;
+    safeSet(sessionStorage, 'lr_ts_type', source.type);
+    safeSet(sessionStorage, 'lr_ts_name', source.name);
+  }
+
   function getFirstTouchTrafficSource() {
     return {
       ft_traffic_source_type: safeGet(localStorage, 'lr_ft_traffic_source_type') || '',
@@ -610,6 +621,7 @@
     var referringDomain = getReferringDomain(document.referrer);
     var trafficSource = classifyTrafficSource(clickIds, utms, referringDomain);
     setFirstTouchTrafficSource(trafficSource);
+    setLastTouchTrafficSource(trafficSource);
 
     // Increment session page count
     var count = parseInt(safeGet(sessionStorage, 'lr_spc') || '0', 10);
