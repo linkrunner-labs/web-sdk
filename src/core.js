@@ -23,38 +23,8 @@
   // dropped in the browser before it ever reached us. '/web/ingest' carries no
   // tracker keyword. The server still answers on '/web/collect' for pages
   // running an older cached bundle, so never point this back at it.
-  /**
-   * Where the bundle itself was served from, when that tells us something.
-   *
-   * A site using a CNAME'd subdomain loads this script from
-   * `https://lr.their-domain.com/web/v1/lr.js`. In that case the collector lives
-   * on the same host by construction — we serve both routes from it — so the
-   * endpoint can be derived instead of configured. That halves the change on
-   * their side to a single `src` attribute, and removes the failure where the
-   * script is moved first-party but the endpoint is forgotten, which looks
-   * exactly like working until someone reads the network tab.
-   *
-   * Matched on the full `/web/v1/` path, not just the host, because a site that
-   * reverse-proxies the bundle at a path of its own choosing (`/lr/lr.js`) has
-   * chosen its collector path too, and guessing `/web/ingest` there would be
-   * wrong. Explicit config always wins over this.
-   */
-  function endpointFromScriptOrigin() {
-    if (!scriptTag || !scriptTag.src) return '';
-
-    try {
-      var url = new URL(scriptTag.src, location.href);
-      // Our own CDN serves the bundle but no collector, so never derive from it.
-      if (url.hostname === 'cdn.linkrunner.io') return '';
-      if (url.pathname.indexOf('/web/v1/') !== 0) return '';
-
-      return url.origin + '/web/ingest';
-    } catch (e) { return ''; }
-  }
-
   var COLLECT_ENDPOINT = configObj.endpoint
     || (scriptTag && scriptTag.getAttribute('data-endpoint'))
-    || endpointFromScriptOrigin()
     || 'https://api.linkrunner.io/web/ingest';
 
   // Payload encryption, off unless a key is configured.
