@@ -75,7 +75,23 @@ function loadSdk(options) {
 
   var parsed = new URL(url);
   var sent = [];
+  var attempts = [];
   var timers = [];
+
+  // options.respond(endpoint) -> { ok, status } | 'network-error'
+  // Default: every endpoint answers 200, which is what every test that does not
+  // care about transport wants.
+  var respond = options.respond || function () { return { ok: true, status: 200 }; };
+
+  // options.scriptAttrs -> the data-* attributes on the <script> tag, for the
+  // endpoint-precedence tests. Absent means no script tag, as before.
+  var scriptTag = options.scriptAttrs
+    ? { getAttribute: function (name) {
+          return Object.prototype.hasOwnProperty.call(options.scriptAttrs, name)
+            ? options.scriptAttrs[name]
+            : null;
+        } }
+    : null;
 
   var sandbox = {
     location: {
@@ -86,9 +102,9 @@ function loadSdk(options) {
       hostname: parsed.hostname,
     },
     document: {
-      currentScript: null,
+      currentScript: scriptTag,
       querySelector: function () {
-        return null;
+        return scriptTag;
       },
       addEventListener: function () {},
       readyState: 'complete',
@@ -133,8 +149,17 @@ function loadSdk(options) {
     URL: URL,
     Date: createDateClass(clock),
     fetch: function (endpoint, init) {
-      sent.push(JSON.parse(init.body));
-      return Promise.resolve({ ok: true, status: 200 });
+      var body = JSON.parse(init.body);
+      attempts.push({ endpoint: endpoint, body: body });
+
+      var res = respond(endpoint);
+      if (res === 'network-error') {
+        // What a refused CORS preflight, a blocked request and a DNS failure
+        // all look like to fetch: a bare TypeError.
+        return Promise.reject(new TypeError('Failed to fetch'));
+      }
+      if (res.ok) sent.push(body);
+      return Promise.resolve(res);
     },
     setTimeout: function (fn) {
       timers.push(fn);
@@ -160,6 +185,10 @@ function loadSdk(options) {
   return {
     sandbox: sandbox,
     sent: sent,
+    attempts: attempts,
+    endpoints: function () {
+      return attempts.map(function (a) { return a.endpoint; });
+    },
     clock: clock,
     localStorage: localStorage,
     sessionStorage: sessionStorage,

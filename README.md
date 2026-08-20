@@ -253,6 +253,18 @@ this still covers most traffic — but **Option 1 covers all of it**, because a
 same-origin path has nothing to uncloak. Pick Option 2 when you cannot ship a
 rewrite, not when you can.
 
+#### If a first-party endpoint stops working
+
+You do not lose events. When the request fails outright — DNS, TLS, a refused
+CORS preflight, a blocker cancelling it — or the host answers `404` or `405`,
+the SDK retries once against `https://api.linkrunner.io/web/ingest`. Two
+requests per event in your network tab means the first-party host is not routing
+`/web/ingest`; fix that and the second one stops.
+
+A `400` or a `5xx` is deliberately **not** retried. Both come from the collector
+itself rather than from the routing in front of it, so a retry would either be
+rejected identically or double-count an event that was already accepted.
+
 ### Preserving the visitor's IP (Option 1)
 
 This is the one thing worth getting right, because getting it wrong fails

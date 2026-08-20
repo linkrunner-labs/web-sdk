@@ -23,9 +23,16 @@
   // dropped in the browser before it ever reached us. '/web/ingest' carries no
   // tracker keyword. The server still answers on '/web/collect' for pages
   // running an older cached bundle, so never point this back at it.
+  var DEFAULT_ENDPOINT = 'https://api.linkrunner.io/web/ingest';
+
+  // First-party collection is opt-in per customer, through `endpoint` /
+  // `data-endpoint`. Deliberately NO token -> host table baked in here: it would
+  // repoint a customer's traffic on our say-so with no change on their page,
+  // which is fine right until the host is wrong, and it would put customer
+  // identifiers in a public repo. See the README's first-party section.
   var COLLECT_ENDPOINT = configObj.endpoint
     || (scriptTag && scriptTag.getAttribute('data-endpoint'))
-    || 'https://api.linkrunner.io/web/ingest';
+    || DEFAULT_ENDPOINT;
 
   // Payload encryption, off unless a key is configured.
   //
@@ -609,7 +616,38 @@
 
   function transmit(json) {
     if (!ENCRYPTION_ENABLED) log('Wire payload is cleartext, ' + json.length + 'B');
+    sendTo(COLLECT_ENDPOINT, json);
+  }
 
+  /**
+   * Should a failed send be retried against the default endpoint?
+   *
+   * Only for a first-party endpoint, and only for the failures that mean "this
+   * host is not serving the collector":
+   *
+   *   status 0    the request never completed — DNS, TLS, a refused CORS
+   *               preflight, or a blocker cancelling it
+   *   404 / 405   the host answered but nothing is routed to /web/ingest. 405
+   *               is specifically the LB's branded-link handler, which is
+   *               GET-only; it is what a customer host returns before the
+   *               collector route ships.
+   *
+   * This is what makes `data-endpoint` safe to set before the routing behind it
+   * is live, and safe to leave set if it ever stops being. Without it, pointing
+   * at a host whose /web/ingest is not serving takes that site's events to zero
+   * with nothing in the payload to say why.
+   *
+   * Deliberately NOT 400 or 5xx. Those come from our own backend, which both
+   * hosts reach: 400 means it read the payload and rejected it, and the retry
+   * would be rejected identically; 5xx means it may already have enqueued the
+   * event, and retrying elsewhere would double-count it.
+   */
+  function shouldFallBack(endpoint, status) {
+    if (endpoint === DEFAULT_ENDPOINT) return false;
+    return status === 0 || status === 404 || status === 405;
+  }
+
+  function sendTo(endpoint, json) {
     /**
      * Priority 1: fetch with keepalive.
      *
@@ -631,8 +669,8 @@
      */
     if (typeof fetch !== 'undefined') {
       try {
-        log('Sending via fetch');
-        fetch(COLLECT_ENDPOINT, {
+        log('Sending via fetch to ' + endpoint);
+        fetch(endpoint, {
           method: 'POST',
           body: json,
           keepalive: true,
@@ -642,7 +680,11 @@
             // An endpoint that answers, but answers wrong: a rewrite to a bad
             // path, a stale CORS policy, an auth rule in front of the
             // collector. Invisible without this line.
-            logError('Endpoint returned HTTP ' + res.status + ' for ' + COLLECT_ENDPOINT);
+            logError('Endpoint returned HTTP ' + res.status + ' for ' + endpoint);
+            if (shouldFallBack(endpoint, res.status)) {
+              logError('Collector not routed on ' + endpoint + ', retrying on ' + DEFAULT_ENDPOINT);
+              sendTo(DEFAULT_ENDPOINT, json);
+            }
           } else {
             log('Sent via fetch');
           }
@@ -650,16 +692,28 @@
           // A blocked request lands here too, as a bare TypeError — the browser
           // deliberately does not say who cancelled it.
           logError('fetch request failed (blocked, offline, or CORS)', e);
+          // Recurses at most one level: shouldFallBack is false once endpoint
+          // IS the default, so the retry cannot itself retry.
+          if (shouldFallBack(endpoint, 0)) {
+            logError('Retrying on ' + DEFAULT_ENDPOINT);
+            sendTo(DEFAULT_ENDPOINT, json);
+          }
         });
       } catch (e) { logError('fetch call failed', e); }
       return;
     }
 
     // Priority 2: sendBeacon, for browsers without fetch.
+    //
+    // No first-party retry past this point. Beacon reports only whether the
+    // browser queued the request and XHR's handlers are not wired up, so
+    // neither can distinguish an unrouted host from a delivered event, and
+    // retrying blind would double-count. Browsers without fetch predate every
+    // blocker this feature is aimed at.
     if (navigator.sendBeacon) {
       try {
         var blob = new Blob([json], { type: 'application/json' });
-        if (navigator.sendBeacon(COLLECT_ENDPOINT, blob)) {
+        if (navigator.sendBeacon(endpoint, blob)) {
           log('Sent via sendBeacon');
           return;
         }
@@ -671,7 +725,7 @@
     try {
       log('Sending via XHR');
       var xhr = new XMLHttpRequest();
-      xhr.open('POST', COLLECT_ENDPOINT, true);
+      xhr.open('POST', endpoint, true);
       xhr.setRequestHeader('Content-Type', 'application/json');
       xhr.send(json);
     } catch (e) { logError('XHR send failed', e); }
