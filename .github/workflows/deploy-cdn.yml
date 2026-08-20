@@ -164,8 +164,9 @@ jobs:
             trap - ERR
             if [[ "$min_updated" == true ]]; then
               local min_current_generation
-              min_current_generation="$(gcloud storage objects describe "$min_path" --format='value(generation)')"
-              if test "$(sha256sum dist/lr.min.js | cut -d' ' -f1)" = "$(gcloud storage cat "${min_path}#${min_current_generation}" | sha256sum | cut -d' ' -f1)"; then
+              if ! min_current_generation="$(gcloud storage objects describe "$min_path" --format='value(generation)')"; then
+                rollback_failed=true
+              elif test "$(sha256sum dist/lr.min.js | cut -d' ' -f1)" = "$(gcloud storage cat "${min_path}#${min_current_generation}" | sha256sum | cut -d' ' -f1)"; then
                 if ! gcloud storage cp /tmp/lr.min.js.previous "$min_path" \
                   --content-type="application/javascript" \
                   --cache-control="public,max-age=0,must-revalidate" \
@@ -180,8 +181,9 @@ jobs:
             fi
             if [[ "$lr_updated" == true ]]; then
               local lr_current_generation
-              lr_current_generation="$(gcloud storage objects describe "$lr_path" --format='value(generation)')"
-              if test "$(sha256sum dist/lr.js | cut -d' ' -f1)" = "$(gcloud storage cat "${lr_path}#${lr_current_generation}" | sha256sum | cut -d' ' -f1)"; then
+              if ! lr_current_generation="$(gcloud storage objects describe "$lr_path" --format='value(generation)')"; then
+                rollback_failed=true
+              elif test "$(sha256sum dist/lr.js | cut -d' ' -f1)" = "$(gcloud storage cat "${lr_path}#${lr_current_generation}" | sha256sum | cut -d' ' -f1)"; then
                 if ! gcloud storage cp /tmp/lr.js.previous "$lr_path" \
                   --content-type="application/javascript" \
                   --cache-control="public,max-age=0,must-revalidate" \
