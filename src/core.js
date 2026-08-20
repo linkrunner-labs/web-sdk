@@ -17,9 +17,15 @@
 
   if (!TOKEN) return;
 
+  // Deliberately NOT '/web/collect'. "collect" is Google Analytics' collector
+  // path, so every mainstream blocklist (EasyPrivacy, AdGuard Tracking
+  // Protection, Brave) matches the token generically — the beacon was being
+  // dropped in the browser before it ever reached us. '/web/ingest' carries no
+  // tracker keyword. The server still answers on '/web/collect' for pages
+  // running an older cached bundle, so never point this back at it.
   var COLLECT_ENDPOINT = configObj.endpoint
     || (scriptTag && scriptTag.getAttribute('data-endpoint'))
-    || 'https://api.linkrunner.io/web/collect';
+    || 'https://api.linkrunner.io/web/ingest';
 
   var SPA_ENABLED = configObj.spa !== false
     && !(scriptTag && scriptTag.getAttribute('data-spa') === 'false');
@@ -795,7 +801,7 @@
     var payload = buildPayload('identify', 'identify', null);
     send(payload);
   };
-  window.lr._version = '0.1.12';
+  window.lr._version = '0.1.13';
 
   // Replay queued events
   if (existingQueue.length) log('Replaying ' + existingQueue.length + ' queued event(s)');
