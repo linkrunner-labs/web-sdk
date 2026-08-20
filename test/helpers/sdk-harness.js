@@ -113,12 +113,19 @@ function loadSdk(options) {
         return [];
       },
     },
-    crypto: {
+    // Pass options.crypto (e.g. require('crypto').webcrypto) to exercise the
+    // payload-encryption path; the default stub has no subtle, which is what a
+    // plain http:// origin looks like and makes the SDK fall back to cleartext.
+    crypto: options.crypto || {
       getRandomValues: function (bytes) {
         for (var i = 0; i < bytes.length; i++) bytes[i] = Math.floor(Math.random() * 256);
         return bytes;
       },
     },
+    // Present in every browser; the vm sandbox does not inherit them from Node.
+    btoa: btoa,
+    atob: atob,
+    TextEncoder: TextEncoder,
     localStorage: localStorage,
     sessionStorage: sessionStorage,
     console: console,
@@ -127,7 +134,7 @@ function loadSdk(options) {
     Date: createDateClass(clock),
     fetch: function (endpoint, init) {
       sent.push(JSON.parse(init.body));
-      return Promise.resolve({});
+      return Promise.resolve({ ok: true, status: 200 });
     },
     setTimeout: function (fn) {
       timers.push(fn);
@@ -138,7 +145,7 @@ function loadSdk(options) {
     innerWidth: 390,
     innerHeight: 844,
     devicePixelRatio: 3,
-    LinkrunnerConfig: { token: 'test_token_193', spa: false, debug: false },
+    LinkrunnerConfig: options.config || { token: 'test_token_193', spa: false, debug: false },
   };
   sandbox.window = sandbox;
   sandbox.self = sandbox;

@@ -27,6 +27,41 @@
     || (scriptTag && scriptTag.getAttribute('data-endpoint'))
     || 'https://api.linkrunner.io/web/ingest';
 
+  // Payload encryption, off unless a key is configured.
+  //
+  // Read this before turning it on: it does NOTHING about ad blockers. They
+  // cancel the request in onBeforeRequest, from the URL — there is never a body
+  // for them to read, encrypted or not. What survives a blocker is a
+  // first-party request URL (see the README), not an unreadable payload.
+  //
+  // What it does buy: the payload names page URLs, referrers, a visitor id and
+  // whatever event_data the site attaches. TLS protects that from the network,
+  // but TLS terminates at every hop holding a certificate — the site's own
+  // reverse proxy in a first-party setup, a corporate MITM appliance. Sealing to
+  // a key only the server holds closes that gap and keeps the event schema off
+  // the wire.
+  //
+  // These two constants are empty here and filled in at release. Empty means no
+  // encryption, which is exactly the behaviour that shipped before this existed;
+  // there is deliberately no placeholder key, because a wrong key would produce
+  // envelopes nothing can decrypt and lose events silently.
+  var SERVER_PUBLIC_KEY = '';
+  var SERVER_KEY_ID = '';
+
+  var ENCRYPTION_PUBLIC_KEY = configObj.publicKey
+    || (scriptTag && scriptTag.getAttribute('data-public-key'))
+    || SERVER_PUBLIC_KEY;
+
+  var ENCRYPTION_KEY_ID = configObj.keyId
+    || (scriptTag && scriptTag.getAttribute('data-key-id'))
+    || SERVER_KEY_ID;
+
+  // Shared verbatim with the server's payload-crypto.ts. Change it on one side
+  // and every envelope silently fails to decrypt on the other.
+  var ENCRYPTION_INFO_PREFIX = 'linkrunner-web-collect-v1:';
+
+  var ENCRYPTION_ENABLED = !!(ENCRYPTION_PUBLIC_KEY && ENCRYPTION_KEY_ID);
+
   var SPA_ENABLED = configObj.spa !== false
     && !(scriptTag && scriptTag.getAttribute('data-spa') === 'false');
 
@@ -122,7 +157,13 @@
 
   function logError(label, error) {
     if (!DEBUG) return;
-    console.error('[Linkrunner] ' + label, error);
+    // Mirrors log(): some callers report a condition rather than an exception,
+    // and appending a bare `undefined` to those makes the console harder to read.
+    if (error !== undefined) {
+      console.error('[Linkrunner] ' + label, error);
+    } else {
+      console.error('[Linkrunner] ' + label);
+    }
   }
 
   // ============================================================
@@ -566,23 +607,28 @@
   // TRANSPORT
   // ============================================================
 
-  function send(data) {
-    var json = JSON.stringify(data);
-    log('Sending ' + data.event_type + (data.event_name ? ':' + data.event_name : ''), data);
+  function transmit(json) {
+    if (!ENCRYPTION_ENABLED) log('Wire payload is cleartext, ' + json.length + 'B');
 
-    // Priority 1: sendBeacon
-    if (navigator.sendBeacon) {
-      try {
-        var blob = new Blob([json], { type: 'application/json' });
-        if (navigator.sendBeacon(COLLECT_ENDPOINT, blob)) {
-          log('Sent via sendBeacon');
-          return;
-        }
-        log('sendBeacon returned false, falling back to fetch');
-      } catch (e) { logError('sendBeacon failed', e); }
-    }
-
-    // Priority 2: fetch with keepalive
+    /**
+     * Priority 1: fetch with keepalive.
+     *
+     * sendBeacon used to be first. It was demoted on evidence, not taste:
+     * measured on a live customer page with a mainstream blocker installed, a
+     * beacon to our collector was cancelled while a fetch carrying the SAME
+     * bytes to the SAME url in the same second went through and got a real
+     * response. Filter lists can match the beacon/ping resource type
+     * separately, and ours is matched. Every event sent by beacon on those
+     * browsers was being dropped.
+     *
+     * The usual argument for beacon-first is surviving page unload. It does not
+     * apply here: `keepalive` gives fetch the same guarantee, and this SDK has
+     * no unload handler to begin with — events fire on page view and on
+     * explicit track() calls, during normal page life.
+     *
+     * fetch also reports a status, which beacon cannot. That is what makes a
+     * misconfigured first-party proxy visible instead of silent.
+     */
     if (typeof fetch !== 'undefined') {
       try {
         log('Sending via fetch');
@@ -591,9 +637,34 @@
           body: json,
           keepalive: true,
           headers: { 'Content-Type': 'application/json' }
-        }).catch(function(e) { logError('fetch request failed', e); });
+        }).then(function(res) {
+          if (res && !res.ok) {
+            // An endpoint that answers, but answers wrong: a rewrite to a bad
+            // path, a stale CORS policy, an auth rule in front of the
+            // collector. Invisible without this line.
+            logError('Endpoint returned HTTP ' + res.status + ' for ' + COLLECT_ENDPOINT);
+          } else {
+            log('Sent via fetch');
+          }
+        }).catch(function(e) {
+          // A blocked request lands here too, as a bare TypeError — the browser
+          // deliberately does not say who cancelled it.
+          logError('fetch request failed (blocked, offline, or CORS)', e);
+        });
       } catch (e) { logError('fetch call failed', e); }
       return;
+    }
+
+    // Priority 2: sendBeacon, for browsers without fetch.
+    if (navigator.sendBeacon) {
+      try {
+        var blob = new Blob([json], { type: 'application/json' });
+        if (navigator.sendBeacon(COLLECT_ENDPOINT, blob)) {
+          log('Sent via sendBeacon');
+          return;
+        }
+        log('sendBeacon returned false, falling back to XHR');
+      } catch (e) { logError('sendBeacon failed', e); }
     }
 
     // Priority 3: XHR
@@ -604,6 +675,125 @@
       xhr.setRequestHeader('Content-Type', 'application/json');
       xhr.send(json);
     } catch (e) { logError('XHR send failed', e); }
+  }
+
+  // ============================================================
+  // PAYLOAD ENCRYPTION
+  // ============================================================
+
+  function toBase64Url(buffer) {
+    var bytes = new Uint8Array(buffer);
+    var binary = '';
+    for (var i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+    return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+  }
+
+  function fromBase64Url(value) {
+    var padded = value.replace(/-/g, '+').replace(/_/g, '/');
+    while (padded.length % 4) padded += '=';
+    var binary = atob(padded);
+    var bytes = new Uint8Array(binary.length);
+    for (var i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+    return bytes;
+  }
+
+  /**
+   * ECDH + HKDF, done once per page load rather than once per event.
+   *
+   * The expensive half — generating an ephemeral P-256 pair and deriving the
+   * shared secret — is identical for every event in the page, so it is cached as
+   * a promise. What is left per event is one AES-GCM encrypt, which is
+   * microseconds. The first event still waits on this; that is the honest cost
+   * of encryption, and it is why a visitor who bounces within a few hundred
+   * milliseconds is likelier to be lost with encryption on than off.
+   */
+  var sealingContext = null;
+
+  function getSealingContext() {
+    if (sealingContext) return sealingContext;
+
+    sealingContext = new Promise(function(resolve, reject) {
+      var subtle = window.crypto && window.crypto.subtle;
+      // Absent on http:// origins — subtle is secure-context only — and on
+      // browsers old enough not to have it at all.
+      if (!subtle) { reject(new Error('WebCrypto unavailable (needs a secure context)')); return; }
+
+      var ephemeral;
+
+      subtle.importKey('raw', fromBase64Url(ENCRYPTION_PUBLIC_KEY), { name: 'ECDH', namedCurve: 'P-256' }, false, [])
+        .then(function(serverKey) {
+          return subtle.generateKey({ name: 'ECDH', namedCurve: 'P-256' }, true, ['deriveBits'])
+            .then(function(pair) {
+              ephemeral = pair;
+              return subtle.deriveBits({ name: 'ECDH', public: serverKey }, pair.privateKey, 256);
+            });
+        })
+        .then(function(shared) {
+          return subtle.importKey('raw', shared, 'HKDF', false, ['deriveBits']);
+        })
+        .then(function(hkdfKey) {
+          // The key id goes into `info`, so an envelope cannot be relabelled to
+          // another key without derivation diverging and the tag check failing.
+          return subtle.deriveBits({
+            name: 'HKDF',
+            hash: 'SHA-256',
+            salt: new Uint8Array(0),
+            info: new TextEncoder().encode(ENCRYPTION_INFO_PREFIX + ENCRYPTION_KEY_ID)
+          }, hkdfKey, 256);
+        })
+        .then(function(aesBits) {
+          return subtle.importKey('raw', aesBits, { name: 'AES-GCM' }, false, ['encrypt']);
+        })
+        .then(function(aesKey) {
+          return subtle.exportKey('raw', ephemeral.publicKey).then(function(epk) {
+            resolve({ aesKey: aesKey, epk: toBase64Url(epk) });
+          });
+        })
+        .catch(reject);
+    });
+
+    return sealingContext;
+  }
+
+  function seal(json) {
+    return getSealingContext().then(function(ctx) {
+      var iv = window.crypto.getRandomValues(new Uint8Array(12));
+      return window.crypto.subtle
+        .encrypt({ name: 'AES-GCM', iv: iv }, ctx.aesKey, new TextEncoder().encode(json))
+        .then(function(sealed) {
+          // Field names are shared with the server's EncryptedEnvelope.
+          return JSON.stringify({
+            lrv: 1,
+            kid: ENCRYPTION_KEY_ID,
+            epk: ctx.epk,
+            iv: toBase64Url(iv),
+            ct: toBase64Url(sealed)
+          });
+        });
+    });
+  }
+
+  function send(data) {
+    var json = JSON.stringify(data);
+    log('Sending ' + data.event_type + (data.event_name ? ':' + data.event_name : ''), data);
+
+    if (!ENCRYPTION_ENABLED) { transmit(json); return; }
+
+    seal(json).then(function(envelope) {
+      // The line above logged the event; this logs what actually LEAVES the
+      // browser. They are worth seeing side by side — the first is what you are
+      // debugging, the second is all anything watching the network gets.
+      log(
+        'Sealed to key ' + ENCRYPTION_KEY_ID + ': ' + json.length + 'B -> ' + envelope.length + 'B on the wire',
+        JSON.parse(envelope)
+      );
+      transmit(envelope);
+    }).catch(function(e) {
+      // Never lose an event to a crypto problem. The endpoint accepts both
+      // shapes precisely so this fallback stays available.
+      logError('Encryption failed, sending cleartext', e);
+      transmit(json);
+    });
   }
 
   // ============================================================
@@ -801,7 +991,7 @@
     var payload = buildPayload('identify', 'identify', null);
     send(payload);
   };
-  window.lr._version = '0.1.13';
+  window.lr._version = '0.1.14';
 
   // Replay queued events
   if (existingQueue.length) log('Replaying ' + existingQueue.length + ' queued event(s)');
