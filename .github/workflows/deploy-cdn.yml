@@ -3,17 +3,26 @@ name: Deploy to CDN
 on:
   push:
     branches: [main]
+  pull_request:
   workflow_dispatch:
 
+permissions:
+  contents: read
+
+env:
+  GCP_PROJECT_ID: lr-prod-482009
+  CDN_BUCKET: lr-prod-cdn-linkrunner-io
+
 jobs:
-  deploy:
+  build:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
-          node-version: 20
+          node-version: 22
+          cache: npm
 
       - run: npm ci
 
@@ -21,21 +30,209 @@ jobs:
 
       - run: npm run build
 
-      - name: Upload to S3
-        uses: aws-actions/configure-aws-credentials@v4
-        with:
-          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
-          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
-          aws-region: ${{ vars.AWS_REGION }}
-
-      - name: Sync to S3 and invalidate CloudFront
+      - name: Verify build version
+        shell: bash
         run: |
-          aws s3 cp dist/lr.js s3://${{ vars.CDN_S3_BUCKET }}/web/v1/lr.js \
-            --content-type "application/javascript" \
-            --cache-control "public, max-age=3600, s-maxage=86400"
-          aws s3 cp dist/lr.min.js s3://${{ vars.CDN_S3_BUCKET }}/web/v1/lr.min.js \
-            --content-type "application/javascript" \
-            --cache-control "public, max-age=3600, s-maxage=86400"
-          aws cloudfront create-invalidation \
-            --distribution-id ${{ vars.CLOUDFRONT_DISTRIBUTION_ID }} \
-            --paths "/web/v1/*"
+          set -euo pipefail
+          version="$(node -p "require('./package.json').version")"
+          lock_root_version="$(node -p "require('./package-lock.json').version")"
+          lock_version="$(node -p "require('./package-lock.json').packages[''].version")"
+          [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          test "$lock_root_version" = "$version"
+          test "$lock_version" = "$version"
+          VERSION="$version" node <<'NODE'
+          const fs = require('fs');
+          const version = process.env.VERSION;
+          for (const file of ['dist/lr.js', 'dist/lr.min.js']) {
+            const contents = fs.readFileSync(file, 'utf8');
+            const match = contents.match(/_version\s*=\s*["']([^"']+)["']/);
+            if (!match || match[1] !== version) {
+              throw new Error(`${file} SDK version ${match?.[1] ?? 'missing'} does not match package version ${version}`);
+            }
+          }
+          NODE
+          mkdir -p deploy-artifacts
+          cp dist/lr.js dist/lr.min.js deploy-artifacts/
+          printf '%s' "$version" > deploy-artifacts/version.txt
+
+      - name: Upload verified deployment artifacts
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: web-sdk-cdn-${{ github.sha }}
+          path: deploy-artifacts/
+          if-no-files-found: error
+          retention-days: 1
+
+  deploy:
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      id-token: write
+    concurrency:
+      group: web-sdk-cdn-production
+      cancel-in-progress: false
+    steps:
+      - name: Download verified deployment artifacts
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          name: web-sdk-cdn-${{ github.sha }}
+          path: dist
+
+      - name: Verify downloaded artifacts
+        id: version
+        shell: bash
+        run: |
+          set -euo pipefail
+          version="$(cat dist/version.txt)"
+          [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]
+          VERSION="$version" node <<'NODE'
+          const fs = require('fs');
+          const version = process.env.VERSION;
+          for (const file of ['dist/lr.js', 'dist/lr.min.js']) {
+            const contents = fs.readFileSync(file, 'utf8');
+            const match = contents.match(/_version\s*=\s*["']([^"']+)["']/);
+            if (!match || match[1] !== version) throw new Error(`${file} does not contain SDK ${version}`);
+          }
+          NODE
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Authenticate to Google Cloud
+        id: auth
+        uses: google-github-actions/auth@c200f3691d83b41bf9bbd8638997a462592937ed # v2
+        with:
+          workload_identity_provider: ${{ secrets.GCP_WORKLOAD_IDENTITY_PROVIDER }}
+          service_account: web-sdk-cdn-deploy@lr-prod-482009.iam.gserviceaccount.com
+
+      - name: Set up Google Cloud CLI
+        uses: google-github-actions/setup-gcloud@e427ad8a34f8676edf47cf7d7925499adf3eb74f # v2
+        with:
+          project_id: ${{ env.GCP_PROJECT_ID }}
+
+      - name: Upload immutable versioned artifacts
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          set -euo pipefail
+          upload_immutable() {
+            local source="$1" destination="$2"
+            local expected actual generation
+            expected="$(sha256sum "$source" | cut -d' ' -f1)"
+            if generation="$(gcloud storage objects describe "$destination" --format='value(generation)' 2>/dev/null)"; then
+              gcloud storage cat "${destination}#${generation}" > /tmp/existing-sdk
+              actual="$(sha256sum /tmp/existing-sdk | cut -d' ' -f1)"
+              test "$actual" = "$expected" || {
+                echo "Refusing to overwrite immutable artifact $destination" >&2
+                exit 1
+              }
+              gcloud storage objects update "$destination" \
+                --content-type="application/javascript" \
+                --cache-control="public,max-age=31536000,immutable" \
+                --if-generation-match="$generation"
+              echo "$destination already contains the expected artifact; metadata verified"
+            else
+              gcloud storage cp "$source" "$destination" \
+                --content-type="application/javascript" \
+                --cache-control="public,max-age=31536000,immutable" \
+                --if-generation-match=0
+            fi
+          }
+
+          upload_immutable dist/lr.js "gs://${CDN_BUCKET}/web/v${VERSION}/lr.js"
+          upload_immutable dist/lr.min.js "gs://${CDN_BUCKET}/web/v${VERSION}/lr.min.js"
+
+          test "$(sha256sum dist/lr.js | cut -d' ' -f1)" = "$(gcloud storage cat "gs://${CDN_BUCKET}/web/v${VERSION}/lr.js" | sha256sum | cut -d' ' -f1)"
+          test "$(sha256sum dist/lr.min.js | cut -d' ' -f1)" = "$(gcloud storage cat "gs://${CDN_BUCKET}/web/v${VERSION}/lr.min.js" | sha256sum | cut -d' ' -f1)"
+
+      - name: Atomically advance hosted v1 aliases
+        run: |
+          set -euo pipefail
+
+          lr_path="gs://${CDN_BUCKET}/web/v1/lr.js"
+          min_path="gs://${CDN_BUCKET}/web/v1/lr.min.js"
+          lr_old_generation="$(gcloud storage objects describe "$lr_path" --format='value(generation)')"
+          min_old_generation="$(gcloud storage objects describe "$min_path" --format='value(generation)')"
+          gcloud storage cat "${lr_path}#${lr_old_generation}" > /tmp/lr.js.previous
+          gcloud storage cat "${min_path}#${min_old_generation}" > /tmp/lr.min.js.previous
+
+          lr_updated=false
+          min_updated=false
+          rollback_aliases() {
+            local status=$?
+            local rollback_failed=false
+            trap - ERR
+            if [[ "$min_updated" == true ]]; then
+              local min_current_generation
+              if ! min_current_generation="$(gcloud storage objects describe "$min_path" --format='value(generation)')"; then
+                rollback_failed=true
+              elif test "$(sha256sum dist/lr.min.js | cut -d' ' -f1)" = "$(gcloud storage cat "${min_path}#${min_current_generation}" | sha256sum | cut -d' ' -f1)"; then
+                if ! gcloud storage cp /tmp/lr.min.js.previous "$min_path" \
+                  --content-type="application/javascript" \
+                  --cache-control="public,max-age=0,must-revalidate" \
+                  --if-generation-match="$min_current_generation"; then
+                  rollback_failed=true
+                elif ! test "$(sha256sum /tmp/lr.min.js.previous | cut -d' ' -f1)" = "$(gcloud storage cat "$min_path" | sha256sum | cut -d' ' -f1)"; then
+                  rollback_failed=true
+                fi
+              else
+                rollback_failed=true
+              fi
+            fi
+            if [[ "$lr_updated" == true ]]; then
+              local lr_current_generation
+              if ! lr_current_generation="$(gcloud storage objects describe "$lr_path" --format='value(generation)')"; then
+                rollback_failed=true
+              elif test "$(sha256sum dist/lr.js | cut -d' ' -f1)" = "$(gcloud storage cat "${lr_path}#${lr_current_generation}" | sha256sum | cut -d' ' -f1)"; then
+                if ! gcloud storage cp /tmp/lr.js.previous "$lr_path" \
+                  --content-type="application/javascript" \
+                  --cache-control="public,max-age=0,must-revalidate" \
+                  --if-generation-match="$lr_current_generation"; then
+                  rollback_failed=true
+                elif ! test "$(sha256sum /tmp/lr.js.previous | cut -d' ' -f1)" = "$(gcloud storage cat "$lr_path" | sha256sum | cut -d' ' -f1)"; then
+                  rollback_failed=true
+                fi
+              else
+                rollback_failed=true
+              fi
+            fi
+            if [[ "$rollback_failed" == true ]]; then
+              echo "::error::Hosted v1 alias rollback was incomplete; inspect both objects before retrying deployment"
+            fi
+            exit "$status"
+          }
+          trap rollback_aliases ERR
+
+          gcloud storage cp dist/lr.js "$lr_path" \
+            --content-type="application/javascript" \
+            --cache-control="public,max-age=0,must-revalidate" \
+            --if-generation-match="$lr_old_generation"
+          lr_updated=true
+
+          gcloud storage cp dist/lr.min.js "$min_path" \
+            --content-type="application/javascript" \
+            --cache-control="public,max-age=0,must-revalidate" \
+            --if-generation-match="$min_old_generation"
+          min_updated=true
+
+          test "$(sha256sum dist/lr.js | cut -d' ' -f1)" = "$(gcloud storage cat "$lr_path" | sha256sum | cut -d' ' -f1)"
+          test "$(sha256sum dist/lr.min.js | cut -d' ' -f1)" = "$(gcloud storage cat "$min_path" | sha256sum | cut -d' ' -f1)"
+          trap - ERR
+
+      - name: Invalidate hosted v1 CDN cache
+        run: |
+          set -euo pipefail
+          for attempt in 1 2 3; do
+            if gcloud compute url-maps invalidate-cdn-cache cdn-linkrunner-io-url-map \
+              --host="cdn.linkrunner.io" \
+              --path="/web/v1/*" \
+              --project="$GCP_PROJECT_ID" \
+              --quiet; then
+              exit 0
+            fi
+            if [[ "$attempt" -lt 3 ]]; then
+              sleep "$((attempt * 10))"
+            fi
+          done
+          echo "::error::Cloud CDN invalidation failed after 3 attempts"
+          exit 1
