@@ -23,9 +23,91 @@
   // dropped in the browser before it ever reached us. '/web/ingest' carries no
   // tracker keyword. The server still answers on '/web/collect' for pages
   // running an older cached bundle, so never point this back at it.
+  var DEFAULT_ENDPOINT = 'https://api.linkrunner.io/web/ingest';
+
+  /**
+   * First-party collection endpoints, keyed by write token.
+   *
+   * Moving off '/web/collect' stops a blocklist matching on the word
+   * "collect"; it does nothing about a list entry for our DOMAIN, and those
+   * exist. The only thing that survives one is collecting from a host the site
+   * already owns, so these are subdomains the customer has CNAME'd to
+   * api.linkrunner.io.
+   *
+   * Why a table in the bundle rather than an attribute on the script tag: the
+   * attribute is the better mechanism and it already exists (`data-endpoint`),
+   * but using it means the customer edits their page, and everyone already
+   * integrated keeps sending to the blocked domain until they get round to it.
+   * The table moves them without their doing anything, because the bundle is
+   * served from our CDN behind a `max-age=0, must-revalidate` alias.
+   *
+   * Adding an entry has a hard prerequisite: the host must already answer POST
+   * /web/ingest. A CNAME and a certificate are not enough — the LB hands
+   * unmatched paths to the branded-link handler, which is GET-only and answers
+   * 405 to both the preflight and the POST. Check before shipping an entry:
+   *
+   *   curl -i -X OPTIONS -H 'Origin: https://<site>' \
+   *     -H 'Access-Control-Request-Method: POST' https://<host>/web/ingest
+   *
+   * and expect 204 with access-control-allow-origin. If it is wrong the events
+   * are not lost (see shouldFallBack) but each one costs a doomed round trip.
+   *
+   * This is a stopgap for customers integrated before `data-endpoint` existed.
+   * New integrations get the attribute and stay out of this table.
+   */
+  var FIRST_PARTY_ENDPOINTS = {
+    // Playo, on their existing branded-link host.
+    'lr_web_fyy3R021a1IgsYS7p1CIwJta': 'https://app.playo.co/web/ingest'
+  };
+
+  // typeof-guarded because the token indexes an object literal: a token of
+  // 'constructor' or 'toString' would otherwise resolve up the prototype chain
+  // to a function and be handed to fetch as a URL.
+  var MAPPED_ENDPOINT = typeof FIRST_PARTY_ENDPOINTS[TOKEN] === 'string'
+    ? FIRST_PARTY_ENDPOINTS[TOKEN]
+    : '';
+
+  // An explicit endpoint outranks the table, so a customer in it can still be
+  // moved or reverted from their own page without waiting on a bundle release.
   var COLLECT_ENDPOINT = configObj.endpoint
     || (scriptTag && scriptTag.getAttribute('data-endpoint'))
-    || 'https://api.linkrunner.io/web/ingest';
+    || MAPPED_ENDPOINT
+    || DEFAULT_ENDPOINT;
+
+  // Payload encryption, off unless a key is configured.
+  //
+  // Read this before turning it on: it does NOTHING about ad blockers. They
+  // cancel the request in onBeforeRequest, from the URL — there is never a body
+  // for them to read, encrypted or not. What survives a blocker is a
+  // first-party request URL (see the README), not an unreadable payload.
+  //
+  // What it does buy: the payload names page URLs, referrers, a visitor id and
+  // whatever event_data the site attaches. TLS protects that from the network,
+  // but TLS terminates at every hop holding a certificate — the site's own
+  // reverse proxy in a first-party setup, a corporate MITM appliance. Sealing to
+  // a key only the server holds closes that gap and keeps the event schema off
+  // the wire.
+  //
+  // These two constants are empty here and filled in at release. Empty means no
+  // encryption, which is exactly the behaviour that shipped before this existed;
+  // there is deliberately no placeholder key, because a wrong key would produce
+  // envelopes nothing can decrypt and lose events silently.
+  var SERVER_PUBLIC_KEY = '';
+  var SERVER_KEY_ID = '';
+
+  var ENCRYPTION_PUBLIC_KEY = configObj.publicKey
+    || (scriptTag && scriptTag.getAttribute('data-public-key'))
+    || SERVER_PUBLIC_KEY;
+
+  var ENCRYPTION_KEY_ID = configObj.keyId
+    || (scriptTag && scriptTag.getAttribute('data-key-id'))
+    || SERVER_KEY_ID;
+
+  // Shared verbatim with the server's payload-crypto.ts. Change it on one side
+  // and every envelope silently fails to decrypt on the other.
+  var ENCRYPTION_INFO_PREFIX = 'linkrunner-web-collect-v1:';
+
+  var ENCRYPTION_ENABLED = !!(ENCRYPTION_PUBLIC_KEY && ENCRYPTION_KEY_ID);
 
   var SPA_ENABLED = configObj.spa !== false
     && !(scriptTag && scriptTag.getAttribute('data-spa') === 'false');
@@ -122,7 +204,13 @@
 
   function logError(label, error) {
     if (!DEBUG) return;
-    console.error('[Linkrunner] ' + label, error);
+    // Mirrors log(): some callers report a condition rather than an exception,
+    // and appending a bare `undefined` to those makes the console harder to read.
+    if (error !== undefined) {
+      console.error('[Linkrunner] ' + label, error);
+    } else {
+      console.error('[Linkrunner] ' + label);
+    }
   }
 
   // ============================================================
@@ -566,44 +654,239 @@
   // TRANSPORT
   // ============================================================
 
-  function send(data) {
-    var json = JSON.stringify(data);
-    log('Sending ' + data.event_type + (data.event_name ? ':' + data.event_name : ''), data);
+  function transmit(json) {
+    if (!ENCRYPTION_ENABLED) log('Wire payload is cleartext, ' + json.length + 'B');
+    sendTo(COLLECT_ENDPOINT, json);
+  }
 
-    // Priority 1: sendBeacon
-    if (navigator.sendBeacon) {
-      try {
-        var blob = new Blob([json], { type: 'application/json' });
-        if (navigator.sendBeacon(COLLECT_ENDPOINT, blob)) {
-          log('Sent via sendBeacon');
-          return;
-        }
-        log('sendBeacon returned false, falling back to fetch');
-      } catch (e) { logError('sendBeacon failed', e); }
-    }
+  /**
+   * Should a failed send be retried against the default endpoint?
+   *
+   * Only for a first-party endpoint, and only for the failures that mean "this
+   * host is not serving the collector":
+   *
+   *   status 0    the request never completed — DNS, TLS, a refused CORS
+   *               preflight, or a blocker cancelling it
+   *   404 / 405   the host answered but nothing is routed to /web/ingest. 405
+   *               is specifically the LB's branded-link handler, which is
+   *               GET-only; it is what a customer host returns before the
+   *               collector route ships.
+   *
+   * This is what makes an entry in FIRST_PARTY_ENDPOINTS safe to ship ahead of
+   * the routing it depends on. Without it, adding a host whose /web/ingest is
+   * not live yet takes that customer's events to zero.
+   *
+   * Deliberately NOT 400 or 5xx. Those come from our own backend, which both
+   * hosts reach: 400 means it read the payload and rejected it, and the retry
+   * would be rejected identically; 5xx means it may already have enqueued the
+   * event, and retrying elsewhere would double-count it.
+   */
+  function shouldFallBack(endpoint, status) {
+    if (endpoint === DEFAULT_ENDPOINT) return false;
+    return status === 0 || status === 404 || status === 405;
+  }
 
-    // Priority 2: fetch with keepalive
+  function sendTo(endpoint, json) {
+    /**
+     * Priority 1: fetch with keepalive.
+     *
+     * sendBeacon used to be first. It was demoted on evidence, not taste:
+     * measured on a live customer page with a mainstream blocker installed, a
+     * beacon to our collector was cancelled while a fetch carrying the SAME
+     * bytes to the SAME url in the same second went through and got a real
+     * response. Filter lists can match the beacon/ping resource type
+     * separately, and ours is matched. Every event sent by beacon on those
+     * browsers was being dropped.
+     *
+     * The usual argument for beacon-first is surviving page unload. It does not
+     * apply here: `keepalive` gives fetch the same guarantee, and this SDK has
+     * no unload handler to begin with — events fire on page view and on
+     * explicit track() calls, during normal page life.
+     *
+     * fetch also reports a status, which beacon cannot. That is what makes a
+     * misconfigured first-party proxy visible instead of silent.
+     */
     if (typeof fetch !== 'undefined') {
       try {
-        log('Sending via fetch');
-        fetch(COLLECT_ENDPOINT, {
+        log('Sending via fetch to ' + endpoint);
+        fetch(endpoint, {
           method: 'POST',
           body: json,
           keepalive: true,
           headers: { 'Content-Type': 'application/json' }
-        }).catch(function(e) { logError('fetch request failed', e); });
+        }).then(function(res) {
+          if (res && !res.ok) {
+            // An endpoint that answers, but answers wrong: a rewrite to a bad
+            // path, a stale CORS policy, an auth rule in front of the
+            // collector. Invisible without this line.
+            logError('Endpoint returned HTTP ' + res.status + ' for ' + endpoint);
+            if (shouldFallBack(endpoint, res.status)) {
+              logError('Collector not routed on ' + endpoint + ', retrying on ' + DEFAULT_ENDPOINT);
+              sendTo(DEFAULT_ENDPOINT, json);
+            }
+          } else {
+            log('Sent via fetch');
+          }
+        }).catch(function(e) {
+          // A blocked request lands here too, as a bare TypeError — the browser
+          // deliberately does not say who cancelled it.
+          logError('fetch request failed (blocked, offline, or CORS)', e);
+          // Recurses at most one level: shouldFallBack is false once endpoint
+          // IS the default, so the retry cannot itself retry.
+          if (shouldFallBack(endpoint, 0)) {
+            logError('Retrying on ' + DEFAULT_ENDPOINT);
+            sendTo(DEFAULT_ENDPOINT, json);
+          }
+        });
       } catch (e) { logError('fetch call failed', e); }
       return;
+    }
+
+    // Priority 2: sendBeacon, for browsers without fetch.
+    //
+    // No first-party retry past this point. Beacon reports only whether the
+    // browser queued the request and XHR's handlers are not wired up, so
+    // neither can distinguish an unrouted host from a delivered event, and
+    // retrying blind would double-count. Browsers without fetch predate every
+    // blocker this feature is aimed at.
+    if (navigator.sendBeacon) {
+      try {
+        var blob = new Blob([json], { type: 'application/json' });
+        if (navigator.sendBeacon(endpoint, blob)) {
+          log('Sent via sendBeacon');
+          return;
+        }
+        log('sendBeacon returned false, falling back to XHR');
+      } catch (e) { logError('sendBeacon failed', e); }
     }
 
     // Priority 3: XHR
     try {
       log('Sending via XHR');
       var xhr = new XMLHttpRequest();
-      xhr.open('POST', COLLECT_ENDPOINT, true);
+      xhr.open('POST', endpoint, true);
       xhr.setRequestHeader('Content-Type', 'application/json');
       xhr.send(json);
     } catch (e) { logError('XHR send failed', e); }
+  }
+
+  // ============================================================
+  // PAYLOAD ENCRYPTION
+  // ============================================================
+
+  function toBase64Url(buffer) {
+    var bytes = new Uint8Array(buffer);
+    var binary = '';
+    for (var i = 0; i < bytes.length; i++) binary += String.fromCharCode(bytes[i]);
+    return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/, '');
+  }
+
+  function fromBase64Url(value) {
+    var padded = value.replace(/-/g, '+').replace(/_/g, '/');
+    while (padded.length % 4) padded += '=';
+    var binary = atob(padded);
+    var bytes = new Uint8Array(binary.length);
+    for (var i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+    return bytes;
+  }
+
+  /**
+   * ECDH + HKDF, done once per page load rather than once per event.
+   *
+   * The expensive half — generating an ephemeral P-256 pair and deriving the
+   * shared secret — is identical for every event in the page, so it is cached as
+   * a promise. What is left per event is one AES-GCM encrypt, which is
+   * microseconds. The first event still waits on this; that is the honest cost
+   * of encryption, and it is why a visitor who bounces within a few hundred
+   * milliseconds is likelier to be lost with encryption on than off.
+   */
+  var sealingContext = null;
+
+  function getSealingContext() {
+    if (sealingContext) return sealingContext;
+
+    sealingContext = new Promise(function(resolve, reject) {
+      var subtle = window.crypto && window.crypto.subtle;
+      // Absent on http:// origins — subtle is secure-context only — and on
+      // browsers old enough not to have it at all.
+      if (!subtle) { reject(new Error('WebCrypto unavailable (needs a secure context)')); return; }
+
+      var ephemeral;
+
+      subtle.importKey('raw', fromBase64Url(ENCRYPTION_PUBLIC_KEY), { name: 'ECDH', namedCurve: 'P-256' }, false, [])
+        .then(function(serverKey) {
+          return subtle.generateKey({ name: 'ECDH', namedCurve: 'P-256' }, true, ['deriveBits'])
+            .then(function(pair) {
+              ephemeral = pair;
+              return subtle.deriveBits({ name: 'ECDH', public: serverKey }, pair.privateKey, 256);
+            });
+        })
+        .then(function(shared) {
+          return subtle.importKey('raw', shared, 'HKDF', false, ['deriveBits']);
+        })
+        .then(function(hkdfKey) {
+          // The key id goes into `info`, so an envelope cannot be relabelled to
+          // another key without derivation diverging and the tag check failing.
+          return subtle.deriveBits({
+            name: 'HKDF',
+            hash: 'SHA-256',
+            salt: new Uint8Array(0),
+            info: new TextEncoder().encode(ENCRYPTION_INFO_PREFIX + ENCRYPTION_KEY_ID)
+          }, hkdfKey, 256);
+        })
+        .then(function(aesBits) {
+          return subtle.importKey('raw', aesBits, { name: 'AES-GCM' }, false, ['encrypt']);
+        })
+        .then(function(aesKey) {
+          return subtle.exportKey('raw', ephemeral.publicKey).then(function(epk) {
+            resolve({ aesKey: aesKey, epk: toBase64Url(epk) });
+          });
+        })
+        .catch(reject);
+    });
+
+    return sealingContext;
+  }
+
+  function seal(json) {
+    return getSealingContext().then(function(ctx) {
+      var iv = window.crypto.getRandomValues(new Uint8Array(12));
+      return window.crypto.subtle
+        .encrypt({ name: 'AES-GCM', iv: iv }, ctx.aesKey, new TextEncoder().encode(json))
+        .then(function(sealed) {
+          // Field names are shared with the server's EncryptedEnvelope.
+          return JSON.stringify({
+            lrv: 1,
+            kid: ENCRYPTION_KEY_ID,
+            epk: ctx.epk,
+            iv: toBase64Url(iv),
+            ct: toBase64Url(sealed)
+          });
+        });
+    });
+  }
+
+  function send(data) {
+    var json = JSON.stringify(data);
+    log('Sending ' + data.event_type + (data.event_name ? ':' + data.event_name : ''), data);
+
+    if (!ENCRYPTION_ENABLED) { transmit(json); return; }
+
+    seal(json).then(function(envelope) {
+      // The line above logged the event; this logs what actually LEAVES the
+      // browser. They are worth seeing side by side — the first is what you are
+      // debugging, the second is all anything watching the network gets.
+      log(
+        'Sealed to key ' + ENCRYPTION_KEY_ID + ': ' + json.length + 'B -> ' + envelope.length + 'B on the wire',
+        JSON.parse(envelope)
+      );
+      transmit(envelope);
+    }).catch(function(e) {
+      // Never lose an event to a crypto problem. The endpoint accepts both
+      // shapes precisely so this fallback stays available.
+      logError('Encryption failed, sending cleartext', e);
+      transmit(json);
+    });
   }
 
   // ============================================================
@@ -801,7 +1084,7 @@
     var payload = buildPayload('identify', 'identify', null);
     send(payload);
   };
-  window.lr._version = '0.1.13';
+  window.lr._version = '0.1.14';
 
   // Replay queued events
   if (existingQueue.length) log('Replaying ' + existingQueue.length + ' queued event(s)');

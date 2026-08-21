@@ -92,11 +92,12 @@ Events can be queued before the script loads — they'll be replayed automatical
 
 ### Script tag attributes
 
-| Attribute    | Required | Description                             | Default |
-| ------------ | -------- | --------------------------------------- | ------- |
-| `data-token` | Yes      | Your Linkrunner project token           | —       |
-| `data-spa`   | No       | Set to `"false"` to disable SPA mode    | `true`  |
-| `data-debug` | No       | `"true"` / `"false"` to force debug mode | Auto    |
+| Attribute       | Required | Description                                          | Default                                |
+| --------------- | -------- | ---------------------------------------------------- | -------------------------------------- |
+| `data-token`    | Yes      | Your Linkrunner project token                        | —                                      |
+| `data-endpoint` | No       | Where events are posted. See [First-party collection](#first-party-collection-recommended) | `https://api.linkrunner.io/web/ingest`, or your own subdomain if we have one on file for your token |
+| `data-spa`      | No       | Set to `"false"` to disable SPA mode                 | `true`                                 |
+| `data-debug`    | No       | `"true"` / `"false"` to force debug mode             | Auto                                   |
 
 ### JavaScript config object
 
@@ -112,6 +113,313 @@ You can also configure via `window.LinkrunnerConfig` before the script loads:
 </script>
 <script src="https://cdn.linkrunner.io/web/v1/lr.js" defer></script>
 ```
+
+## First-party collection (recommended)
+
+By default the SDK loads from `cdn.linkrunner.io` and posts to `api.linkrunner.io`.
+Both are third-party requests, and ad blockers match requests by **domain**, not
+just by path — so no endpoint name we choose can outrun a blocklist rule written
+against our domain. Roughly a quarter of desktop users run one.
+
+Serving both through **your own domain** makes them first-party. There is nothing
+left for a domain rule to match, and the beacon is same-origin, so it also stops
+issuing a CORS preflight.
+
+This is measured, not assumed. On a live customer page with a mainstream blocker
+installed, an event sent to `api.linkrunner.io` was cancelled, while the same
+bytes sent to a subdomain of the site's own domain — CNAME'd to that very same
+server — went through and got a real response. The blocker matches the hostname
+the browser sees, and nothing else. Encrypting the payload changed nothing in
+either direction, because the request is cancelled before a body is ever sent.
+
+### Option 1: proxy through your own origin (strongest)
+
+You need two routes on your origin:
+
+| Your path     | Proxies to                             | Why                       |
+| ------------- | -------------------------------------- | ------------------------- |
+| `/lr/lr.js`   | `https://cdn.linkrunner.io/web/v1/lr.js` | The SDK itself            |
+| `/lr/ingest`  | `https://api.linkrunner.io/web/ingest` | Where events are posted   |
+
+**Pick your own path.** `/lr/` is an example, not a requirement. A path every
+customer shares is a pattern someone can write one filter rule against; a path
+unique to your site is not. Anything that does not read as analytics works —
+`/api/metrics-relay`, `/s/e`, whatever fits your app.
+
+### Next.js
+
+```js
+// next.config.js
+module.exports = {
+  async rewrites() {
+    return [
+      { source: '/lr/lr.js', destination: 'https://cdn.linkrunner.io/web/v1/lr.js' },
+      { source: '/lr/ingest', destination: 'https://api.linkrunner.io/web/ingest' },
+    ]
+  },
+}
+```
+
+```tsx
+<LinkrunnerScript
+  token="YOUR_PROJECT_TOKEN"
+  scriptSrc="/lr/lr.js"
+  endpoint="/lr/ingest"
+/>
+```
+
+### Plain script tag
+
+```html
+<script src="/lr/lr.js" data-token="YOUR_PROJECT_TOKEN" data-endpoint="/lr/ingest"></script>
+```
+
+### nginx
+
+```nginx
+location /lr/ingest {
+    proxy_pass https://api.linkrunner.io/web/ingest;
+    proxy_set_header Host api.linkrunner.io;
+    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+}
+
+location /lr/lr.js {
+    proxy_pass https://cdn.linkrunner.io/web/v1/lr.js;
+    proxy_set_header Host cdn.linkrunner.io;
+}
+```
+
+### Cloudflare Workers
+
+A Worker's `fetch()` builds fresh headers, so the visitor's address has to be
+passed on explicitly:
+
+```js
+export default {
+  async fetch(request) {
+    const url = new URL(request.url)
+    if (url.pathname !== '/lr/ingest') return fetch(request)
+
+    return fetch('https://api.linkrunner.io/web/ingest', {
+      method: 'POST',
+      body: request.body,
+      headers: {
+        'Content-Type': 'application/json',
+        'X-Linkrunner-Visitor-IP': request.headers.get('CF-Connecting-IP'),
+      },
+    })
+  },
+}
+```
+
+### Option 2: a subdomain pointed at us (no proxy to run)
+
+If you would rather not run a proxy, delegate a subdomain instead. Add it under
+**Settings → Manage Domains** in the dashboard, then point it at us:
+
+```
+lr.your-domain.com.  CNAME  api.linkrunner.io.
+```
+
+We issue the certificate automatically on first request — only for subdomains
+registered against your project — and serve the collector from it.
+
+**Change one attribute.** Point `data-endpoint` at your subdomain:
+
+```html
+<script
+  src="https://cdn.linkrunner.io/web/v1/lr.js"
+  data-token="YOUR_PROJECT_TOKEN"
+  data-endpoint="https://lr.your-domain.com/web/ingest"
+></script>
+```
+
+```tsx
+<LinkrunnerScript token="YOUR_PROJECT_TOKEN" endpoint="https://lr.your-domain.com/web/ingest" />
+```
+
+The script keeps loading from our CDN, which is deliberate: it is the beacon
+that gets blocked, not the bundle. If you would rather serve the bundle
+first-party too, proxy it yourself as in Option 1 and set `scriptSrc`.
+
+Nothing to deploy, nothing to keep working, and the visitor's IP arrives exactly
+right because there is no proxy of yours in the path to lose it.
+
+The trade-off is real, though. The CNAME resolves to `api.linkrunner.io`, and
+uBlock Origin on Firefox — and Brave — follow the chain and apply their filters
+to what they find at the end of it. On those browsers this is worth no more than
+posting to us directly. Chrome extensions have no DNS API and cannot do it, so
+this still covers most traffic — but **Option 1 covers all of it**, because a
+same-origin path has nothing to uncloak. Pick Option 2 when you cannot ship a
+rewrite, not when you can.
+
+#### If you cannot edit the page at all
+
+Tell us the subdomain and we will ship the mapping inside the bundle, keyed to
+your project token. Nothing on your side changes: the bundle is served behind a
+`max-age=0, must-revalidate` alias, so your pages pick it up on their next load.
+It does not lock you in either — `data-endpoint` still wins over it, so you can
+move or revert yourself later without waiting on a release from us.
+
+#### If a first-party endpoint stops working
+
+You do not lose events. When the request fails outright — DNS, TLS, a refused
+CORS preflight, a blocker cancelling it — or the host answers `404` or `405`,
+the SDK retries once against `https://api.linkrunner.io/web/ingest`. Two
+requests per event in your network tab means the first-party host is not routing
+`/web/ingest`; fix that and the second one stops.
+
+A `400` or a `5xx` is deliberately **not** retried. Both come from the collector
+itself rather than from the routing in front of it, so a retry would either be
+rejected identically or double-count an event that was already accepted.
+
+### Preserving the visitor's IP (Option 1)
+
+This is the one thing worth getting right, because getting it wrong fails
+silently. We derive geo from the address the request arrives with. If your proxy
+drops the visitor's address, every one of your visitors arrives as your CDN, and
+the data will look plausible while being wrong.
+
+Either is fine:
+
+- forward `X-Forwarded-For` with the visitor's address first — the nginx block
+  above does this, and most managed platforms do it for you, or
+- set `X-Linkrunner-Visitor-IP` to the visitor's address explicitly, which is
+  worth doing whenever you are not certain of the first.
+
+Private addresses in the chain are skipped, so an internal hop in front of your
+proxy does no harm.
+
+Check it once after setup rather than assuming: compare the country on a handful
+of new web events against where you actually are. Everything landing in one place
+means the address is being lost.
+
+### Verifying the setup
+
+Load a page with `data-debug="true"` and watch the console. The SDK posts via
+`fetch`, which reports a status — a misdirected rewrite shows up as
+`Endpoint returned HTTP 404`. A working install logs `Sent via fetch`.
+
+### What this does not fix
+
+First-party is the strongest available client-side answer, not an absolute one.
+Filter lists can still add rules against a specific first-party path, which is
+why the path should be yours rather than ours. Safari's ITP still caps
+script-writable storage regardless of who serves it. For conversions that must
+not be lost — payments, signups — send them server-to-server from your backend,
+where no blocker participates at all.
+
+## Payload encryption (optional)
+
+Events can be sealed in the browser so only Linkrunner can read them.
+
+**Read this first: it does nothing about ad blockers.** Blockers cancel the
+request in `onBeforeRequest`, from the URL alone — there is never a body for
+them to read, encrypted or not. If you are here to avoid being blocked, the
+answer is [first-party collection](#first-party-collection-recommended); this is
+a different feature solving a different problem.
+
+What it does buy: the payload names page URLs, referrers, a visitor id and
+whatever you attach as `event_data`. TLS protects that from the network, but TLS
+terminates at every hop holding a certificate — your own reverse proxy in the
+first-party setup above, a corporate MITM appliance on a visitor's network, any
+CDN in between. Sealing to a key only we hold closes the gap, and keeps the event
+schema off the wire.
+
+What it does not buy: authentication. The SDK holds only a public key, so anyone
+can produce a valid envelope. That is not a regression — your project token is
+already visible in your page source — but a decrypted payload is not a trusted
+one.
+
+### Turning it on
+
+Nothing to configure: the key ships in the bundle, and a bundle without one sends
+cleartext exactly as before. Ask us to issue you a keyed build. Both shapes are
+accepted on the endpoint permanently, so cached older bundles keep reporting
+throughout and it is safe to roll back.
+
+### What it costs
+
+- **~1.8 KB** more minified SDK.
+- **One ECDH per page load**, not per event — the expensive half is derived once
+  and cached, leaving one AES-GCM encrypt per event.
+- **The first event waits on that derivation.** A visitor who bounces within a
+  few hundred milliseconds is likelier to be lost with encryption on than off.
+- **Payloads grow by about 40%**, from base64. A real 3.2 KB page view seals to
+  4.4 KB — well inside the collector's 64 KB ceiling.
+- **Nothing readable in devtools.** Your own network tab shows an opaque
+  envelope, which is a real cost when debugging an integration.
+
+If any of those matter more to you than the payload being unreadable in transit,
+leave it off. It is off by default for that reason.
+
+### How it works
+
+ECIES over P-256 — an ephemeral key pair per page load, ECDH against our public
+key, HKDF-SHA256 to an AES-256-GCM key, fresh IV per event. The key id is bound
+into the HKDF `info`, so an envelope cannot be relabelled to a different key. If
+WebCrypto is unavailable — an `http://` origin, since `crypto.subtle` is
+secure-context only — the SDK sends cleartext rather than dropping the event.
+
+## Testing locally
+
+### Console logging
+
+Load any page with `data-debug="true"` and the SDK reports both halves of every
+event — what you are debugging, then what actually leaves the browser:
+
+```
+[Linkrunner] Sending page_view {token: "...", event_type: "page_view", ...}
+[Linkrunner] Sealed to key k1: 1922B -> 2736B on the wire {lrv: 1, kid: "k1", epk: "BAar...", iv: "uBv-...", ct: "nlmG..."}
+```
+
+With encryption off it states the wire size instead, so the two are directly
+comparable:
+
+```
+[Linkrunner] Wire payload is cleartext, 1921B
+```
+
+### Running your local SDK on a real website
+
+To replace the CDN bundle on a site you do not control, use Chrome DevTools
+**Local Overrides**:
+
+1. DevTools → **Sources** → **Overrides** → *Select folder for overrides*, and
+   allow access.
+2. Load the site once so `cdn.linkrunner.io/web/v1/lr.js` appears in **Network**.
+3. Right-click that request → **Override content**.
+4. Replace the file's contents with your `src/core.js`. Change the default
+   endpoint near the top of the file to `http://localhost:8787/web/ingest` if you
+   want the events to land in the dev collector — the page's own script tag will
+   otherwise keep pointing at production.
+5. Reload. The override persists across reloads until you turn it off.
+
+### Pasting into the console
+
+This works, with two things to get right:
+
+```js
+// 1. Set the config FIRST — core.js reads it the moment it executes.
+window.LinkrunnerConfig = {
+  token: 'dev_token',
+  endpoint: 'http://localhost:8787/web/ingest',
+  spa: false,
+  debug: true,
+}
+// 2. Then paste the entire contents of src/core.js and hit enter.
+```
+
+Caveats worth knowing before you conclude something is broken:
+
+- **The site's CSP can block the beacon.** `connect-src` applies to your pasted
+  code just as it does to the page's own, and a strict policy will refuse a POST
+  to localhost. The console will say so. Test on the dev collector's page or a
+  site you control.
+- **Re-pasting on the same page double-fires.** `window.lr` already exists and
+  the script re-initialises. Reload between runs.
+- **`document.currentScript` is null in the console**, so `data-*` attributes are
+  not available — configure through `window.LinkrunnerConfig`, as above.
 
 ## Debugging
 
@@ -152,7 +460,7 @@ All logs are prefixed with `[Linkrunner]` in the console:
 - **Page views** — URL being tracked, SPA navigation events
 - **Custom events** — event name and data passed to `lr.track()`
 - **Payloads** — full request body sent to the collection endpoint
-- **Transport** — which method was used (sendBeacon, fetch, or XHR)
+- **Transport** — which method was used (fetch, then sendBeacon, then XHR)
 - **Errors** — any caught errors are logged via `console.error`
 
 ## User identification

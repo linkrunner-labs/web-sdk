@@ -75,7 +75,23 @@ function loadSdk(options) {
 
   var parsed = new URL(url);
   var sent = [];
+  var attempts = [];
   var timers = [];
+
+  // options.respond(endpoint) -> { ok, status } | 'network-error'
+  // Default: every endpoint answers 200, which is what every test that does not
+  // care about transport wants.
+  var respond = options.respond || function () { return { ok: true, status: 200 }; };
+
+  // options.scriptAttrs -> the data-* attributes on the <script> tag, for the
+  // endpoint-precedence tests. Absent means no script tag, as before.
+  var scriptTag = options.scriptAttrs
+    ? { getAttribute: function (name) {
+          return Object.prototype.hasOwnProperty.call(options.scriptAttrs, name)
+            ? options.scriptAttrs[name]
+            : null;
+        } }
+    : null;
 
   var sandbox = {
     location: {
@@ -86,9 +102,9 @@ function loadSdk(options) {
       hostname: parsed.hostname,
     },
     document: {
-      currentScript: null,
+      currentScript: scriptTag,
       querySelector: function () {
-        return null;
+        return scriptTag;
       },
       addEventListener: function () {},
       readyState: 'complete',
@@ -113,12 +129,19 @@ function loadSdk(options) {
         return [];
       },
     },
-    crypto: {
+    // Pass options.crypto (e.g. require('crypto').webcrypto) to exercise the
+    // payload-encryption path; the default stub has no subtle, which is what a
+    // plain http:// origin looks like and makes the SDK fall back to cleartext.
+    crypto: options.crypto || {
       getRandomValues: function (bytes) {
         for (var i = 0; i < bytes.length; i++) bytes[i] = Math.floor(Math.random() * 256);
         return bytes;
       },
     },
+    // Present in every browser; the vm sandbox does not inherit them from Node.
+    btoa: btoa,
+    atob: atob,
+    TextEncoder: TextEncoder,
     localStorage: localStorage,
     sessionStorage: sessionStorage,
     console: console,
@@ -126,8 +149,17 @@ function loadSdk(options) {
     URL: URL,
     Date: createDateClass(clock),
     fetch: function (endpoint, init) {
-      sent.push(JSON.parse(init.body));
-      return Promise.resolve({});
+      var body = JSON.parse(init.body);
+      attempts.push({ endpoint: endpoint, body: body });
+
+      var res = respond(endpoint);
+      if (res === 'network-error') {
+        // What a refused CORS preflight, a blocked request and a DNS failure
+        // all look like to fetch: a bare TypeError.
+        return Promise.reject(new TypeError('Failed to fetch'));
+      }
+      if (res.ok) sent.push(body);
+      return Promise.resolve(res);
     },
     setTimeout: function (fn) {
       timers.push(fn);
@@ -138,7 +170,7 @@ function loadSdk(options) {
     innerWidth: 390,
     innerHeight: 844,
     devicePixelRatio: 3,
-    LinkrunnerConfig: { token: 'test_token_193', spa: false, debug: false },
+    LinkrunnerConfig: options.config || { token: 'test_token_193', spa: false, debug: false },
   };
   sandbox.window = sandbox;
   sandbox.self = sandbox;
@@ -153,6 +185,10 @@ function loadSdk(options) {
   return {
     sandbox: sandbox,
     sent: sent,
+    attempts: attempts,
+    endpoints: function () {
+      return attempts.map(function (a) { return a.endpoint; });
+    },
     clock: clock,
     localStorage: localStorage,
     sessionStorage: sessionStorage,
