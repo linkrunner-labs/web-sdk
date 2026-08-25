@@ -354,35 +354,6 @@ script-writable storage regardless of who serves it. For conversions that must
 not be lost — payments, signups — send them server-to-server from your backend,
 where no blocker participates at all.
 
-## What the collector checks
-
-A request to `/web/ingest` is **validated, not authenticated**. The difference
-matters, and the two are easy to conflate:
-
-| Check | Behaviour |
-| ----- | --------- |
-| Token present | Body must carry `token` as a non-empty string, plus at least one of `event_type` / `event_name`. Otherwise `400`. |
-| Token known | Looked up as a `WEB_SDK_TOKEN`. Unknown token → `401`. Nothing is ingested without a valid one. |
-| Size | `413` above 64 KB, and every string field is truncated at 2048 characters. |
-| Rate | **None.** There is no rate limiter on `/web/ingest` today. |
-| Origin | CORS on `/web` reflects any origin, deliberately — every customer site has to be able to post to it. So CORS restricts nothing here. |
-
-So a token is genuinely required, and posting without one fails. But the token is
-**public by design**: it sits in the page source of every site running the SDK,
-as `data-token="..."`. Anyone who reads your HTML can post events with it. The
-`401` proves a token exists, not that the sender is you. There is also no auth
-middleware on the route — the token check lives inside the handler itself.
-
-Payload encryption does not change this either (see below): the SDK holds only a
-public key, so anyone can produce a valid envelope. A sealed payload is
-confidential, not attributable.
-
-**If an event has to be trustworthy** — a payment, an entitlement change,
-anything you would not want a stranger to be able to fabricate — send it
-server-to-server from your backend, where you hold a secret the browser never
-sees. Client-side collection is the right tool for behavioural analytics and the
-wrong one for anything you must be able to prove.
-
 ## Payload encryption (optional)
 
 Events can be sealed in the browser so only Linkrunner can read them.
