@@ -223,17 +223,29 @@ export default {
 
 ### Option 2: a subdomain pointed at us (no proxy to run)
 
-If you would rather not run a proxy, delegate a subdomain instead. Add it under
-**Settings → Manage Domains** in the dashboard, then point it at us:
+If you would rather not run a proxy, delegate a subdomain instead. Four steps,
+one of which is a single attribute on the tag you already have.
+
+#### 1. Register the subdomain
+
+In the dashboard, go to **Settings → Manage Domains** and add the subdomain you
+want to collect from, for example `lr.your-domain.com`.
+
+This is not optional bookkeeping: we issue the TLS certificate on first request
+only for subdomains registered against your project, so an unregistered host
+never gets one.
+
+#### 2. Point it at us
+
+Add a CNAME record with your DNS provider:
 
 ```
 lr.your-domain.com.  CNAME  api.linkrunner.io.
 ```
 
-We issue the certificate automatically on first request — only for subdomains
-registered against your project — and serve the collector from it.
+#### 3. Name it with `data-domain`
 
-**Add one attribute.** Name the subdomain with `data-domain`:
+Add one attribute to the script tag you already have:
 
 ```html
 <script
@@ -244,8 +256,22 @@ registered against your project — and serve the collector from it.
 ></script>
 ```
 
+With the Next.js component:
+
 ```tsx
 <LinkrunnerScript token="YOUR_PROJECT_TOKEN" domain="lr.your-domain.com" />
+```
+
+Or through the global config, set before the script loads:
+
+```html
+<script>
+  window.LinkrunnerConfig = {
+    token: 'YOUR_PROJECT_TOKEN',
+    domain: 'lr.your-domain.com',
+  }
+</script>
+<script src="https://cdn.linkrunner.io/web/v1/lr.js" defer></script>
 ```
 
 That is the whole change: from that page load on, every event is posted to
@@ -259,6 +285,8 @@ internationalised host is converted to punycode for you. Use `data-endpoint`
 only for Option 1, where the path is yours rather than ours; it overrides
 `data-domain` when both are set.
 
+#### 4. Verify
+
 **Check the host actually serves the collector** before you rely on it. A CNAME
 and a certificate are not enough on their own, and anything you put in front of
 the subdomain — a WAF, a bot filter, an auth proxy — sits in the path too:
@@ -268,9 +296,15 @@ curl -i -X OPTIONS -H 'Origin: https://your-domain.com' \
   -H 'Access-Control-Request-Method: POST' https://lr.your-domain.com/web/ingest
 ```
 
-Expect `204` with an `access-control-allow-origin` header. Anything else and the
-SDK falls back per event (see below) — no events are lost, but each one costs a
-doomed round trip until it is fixed.
+Expect `204` with an `access-control-allow-origin` header. Then load your site
+and confirm in the **Network** tab that event POSTs go to
+`https://lr.your-domain.com/web/ingest`.
+
+**Two requests per event** — one to your subdomain, one to `api.linkrunner.io` —
+means the subdomain is not serving `/web/ingest` yet. No events are lost, because
+the SDK retries on our domain (see below), but each one costs a doomed round trip
+until it is fixed. Check the CNAME, that the domain is registered in the
+dashboard, and that nothing in front of the subdomain is refusing the POST.
 
 The script keeps loading from our CDN, which is deliberate: it is the beacon
 that gets blocked, not the bundle. If you would rather serve the bundle
