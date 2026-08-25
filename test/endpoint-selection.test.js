@@ -173,9 +173,11 @@ test('a refused data-domain says why it was refused', function () {
   assert.strictEqual(credentials.length, 1, 'the credentials case names credentials');
   assert.strictEqual(notAHost.length, 1, 'the malformed case still says not a hostname');
   // Both must name the value and where events are going instead, or the
-  // customer cannot tell which attribute is at fault.
-  assert.ok(credentials[0].indexOf('user:pass@lr.example.com') !== -1);
-  assert.ok(credentials[0].indexOf(DEFAULT) !== -1);
+  // customer cannot tell which attribute is at fault. Matched in position
+  // rather than by substring: the message has to END by naming the endpoint,
+  // which is the part that makes it actionable.
+  assert.match(credentials[0], /"user:pass@lr\.example\.com": it carries credentials/);
+  assert.match(credentials[0], /sending to https:\/\/api\.linkrunner\.io\/web\/ingest instead\.$/);
 });
 
 // An IDN host is legal and reaches the wire as punycode. Rejecting it would
