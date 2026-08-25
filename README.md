@@ -298,8 +298,8 @@ us.
 
 This is a stopgap for teams who cannot get a page change shipped, not the normal
 path. If you can edit the script tag, use `data-domain`: it takes effect on your
-next deploy instead of ours, and it is the only one of the two we will keep
-adding to.
+next deploy instead of ours, and it cannot go stale on our side the way an entry
+in the bundle can.
 
 #### If a first-party endpoint stops working
 

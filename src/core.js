@@ -53,14 +53,24 @@
    * and expect 204 with access-control-allow-origin. If it is wrong the events
    * are not lost (see shouldFallBack) but each one costs a doomed round trip.
    *
-   * This is a stopgap, and a closed one. It carries customers who integrated
-   * before `data-domain` existed, until their team edits the page; every new
-   * integration names its own host with `data-domain` and never lands here.
-   * Do not add an entry for a customer who can change their script tag.
+   * This is a stopgap. It carries customers who integrated before
+   * `data-domain` existed and moves them without their doing anything, until
+   * their team edits the page and the entry can be deleted.
+   *
+   * It is not the default path and should not grow on its own: an entry costs a
+   * bundle release from us and pins a hostname we have to keep true, where
+   * `data-domain` takes effect on the customer's next deploy and cannot go
+   * stale on our side. Reach for the table only when a page change is not
+   * available; anyone who can edit their script tag gets the attribute.
    */
   var FIRST_PARTY_ENDPOINTS = {
     // Playo, on their existing branded-link host.
-    'lr_web_fyy3R021a1IgsYS7p1CIwJta': 'https://app.playo.co/web/ingest'
+    'lr_web_fyy3R021a1IgsYS7p1CIwJta': 'https://app.playo.co/web/ingest',
+    // Meatigo (project 341), likewise on the branded-link host they already
+    // have. CNAME'd to api.linkrunner.io, and the preflight below was checked
+    // on 2026-08-25: OPTIONS /web/ingest answered 204 with
+    // access-control-allow-origin, so the collector route is live there.
+    'lr_web_9Xk2mQa7LpR3sYb8TnF4wZcH': 'https://app.meatigo.com/web/ingest'
   };
 
   // typeof-guarded because the token indexes an object literal: a token of

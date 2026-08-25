@@ -17,6 +17,8 @@ var loadSdk = require('./helpers/sdk-harness').loadSdk;
 var DEFAULT = 'https://api.linkrunner.io/web/ingest';
 var PLAYO_TOKEN = 'lr_web_fyy3R021a1IgsYS7p1CIwJta';
 var PLAYO_ENDPOINT = 'https://app.playo.co/web/ingest';
+var MEATIGO_TOKEN = 'lr_web_9Xk2mQa7LpR3sYb8TnF4wZcH';
+var MEATIGO_ENDPOINT = 'https://app.meatigo.com/web/ingest';
 
 var PAGE = 'https://playo.co/venues?utm_source=meta&utm_medium=cpc&utm_campaign=aug';
 
@@ -48,6 +50,33 @@ test('a mapped token posts to its first-party host', function () {
   sdk.pageView();
 
   assert.deepStrictEqual(sdk.endpoints(), [PLAYO_ENDPOINT]);
+});
+
+// Every entry in the table is a hostname we have to keep true, so each one is
+// pinned here: a typo in a token or a host is otherwise invisible until that
+// customer's events quietly start taking the fallback path.
+test('every mapped token posts to its own first-party host', function () {
+  [
+    { token: PLAYO_TOKEN, endpoint: PLAYO_ENDPOINT },
+    { token: MEATIGO_TOKEN, endpoint: MEATIGO_ENDPOINT },
+  ].forEach(function (entry) {
+    var sdk = load({ config: { token: entry.token, spa: false, debug: false } });
+    sdk.pageView();
+
+    assert.deepStrictEqual(sdk.endpoints(), [entry.endpoint], entry.token);
+  });
+});
+
+// The table is ours and the attribute is theirs, for every entry, not just the
+// first one added.
+test('data-domain outranks the table for any mapped token', function () {
+  var sdk = load({
+    config: { token: MEATIGO_TOKEN, spa: false, debug: false },
+    scriptAttrs: { 'data-token': MEATIGO_TOKEN, 'data-domain': 'lr.meatigo.com' },
+  });
+  sdk.pageView();
+
+  assert.deepStrictEqual(sdk.endpoints(), ['https://lr.meatigo.com/web/ingest']);
 });
 
 test('the payload is unchanged by which host it goes to', function () {
