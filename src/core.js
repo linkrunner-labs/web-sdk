@@ -23,7 +23,8 @@
   // dropped in the browser before it ever reached us. '/web/ingest' carries no
   // tracker keyword. The server still answers on '/web/collect' for pages
   // running an older cached bundle, so never point this back at it.
-  var DEFAULT_ENDPOINT = 'https://api.linkrunner.io/web/ingest';
+  var COLLECT_PATH = '/web/ingest';
+  var DEFAULT_ENDPOINT = 'https://api.linkrunner.io' + COLLECT_PATH;
 
   /**
    * First-party collection endpoints, keyed by write token.
@@ -35,9 +36,9 @@
    * api.linkrunner.io.
    *
    * Why a table in the bundle rather than an attribute on the script tag: the
-   * attribute is the better mechanism and it already exists (`data-endpoint`),
-   * but using it means the customer edits their page, and everyone already
-   * integrated keeps sending to the blocked domain until they get round to it.
+   * attribute is the better mechanism and it exists (`data-domain`), but using
+   * it means the customer edits their page, and everyone already integrated
+   * keeps sending to the blocked domain until they get round to it.
    * The table moves them without their doing anything, because the bundle is
    * served from our CDN behind a `max-age=0, must-revalidate` alias.
    *
@@ -52,12 +53,24 @@
    * and expect 204 with access-control-allow-origin. If it is wrong the events
    * are not lost (see shouldFallBack) but each one costs a doomed round trip.
    *
-   * This is a stopgap for customers integrated before `data-endpoint` existed.
-   * New integrations get the attribute and stay out of this table.
+   * This is a stopgap. It carries customers who integrated before
+   * `data-domain` existed and moves them without their doing anything, until
+   * their team edits the page and the entry can be deleted.
+   *
+   * It is not the default path and should not grow on its own: an entry costs a
+   * bundle release from us and pins a hostname we have to keep true, where
+   * `data-domain` takes effect on the customer's next deploy and cannot go
+   * stale on our side. Reach for the table only when a page change is not
+   * available; anyone who can edit their script tag gets the attribute.
    */
   var FIRST_PARTY_ENDPOINTS = {
     // Playo, on their existing branded-link host.
-    'lr_web_fyy3R021a1IgsYS7p1CIwJta': 'https://app.playo.co/web/ingest'
+    'lr_web_fyy3R021a1IgsYS7p1CIwJta': 'https://app.playo.co/web/ingest',
+    // Meatigo (project 341), likewise on the branded-link host they already
+    // have. CNAME'd to api.linkrunner.io, and the preflight below was checked
+    // on 2026-08-25: OPTIONS /web/ingest answered 204 with
+    // access-control-allow-origin, so the collector route is live there.
+    'lr_web_9Xk2mQa7LpR3sYb8TnF4wZcH': 'https://app.meatigo.com/web/ingest'
   };
 
   // typeof-guarded because the token indexes an object literal: a token of
@@ -67,10 +80,110 @@
     ? FIRST_PARTY_ENDPOINTS[TOKEN]
     : '';
 
-  // An explicit endpoint outranks the table, so a customer in it can still be
-  // moved or reverted from their own page without waiting on a bundle release.
+  /**
+   * The customer's own collection host, declared on the script tag.
+   *
+   * This is the mechanism every new integration uses, and it is what makes
+   * FIRST_PARTY_ENDPOINTS a closed set rather than a growing one: the customer
+   * CNAMEs a subdomain of their own site to api.linkrunner.io, names it here,
+   * and the beacon is first-party from the first page load — no release from
+   * us, no entry in a table in the bundle.
+   *
+   * It takes a HOST, not a URL, because the path is ours to choose and has
+   * already moved once (/web/collect -> /web/ingest, to get out from under
+   * blocklist rules matching the word "collect"). A customer who wrote the path
+   * into their page would be stranded on the old one the next time it moves;
+   * one who wrote only the host follows us automatically.
+   *
+   *   <script src="..." data-token="..." data-domain="lr.your-domain.com">
+   *
+   * Anything a customer plausibly pastes is accepted and normalised to
+   * https://<host>/web/ingest: a bare host, a scheme, a trailing slash, or the
+   * full endpoint URL including the path.
+   */
+  // Why a value was refused, not just that it was. The two rejection paths look
+  // identical to a customer reading the console — a value carrying credentials
+  // is usually a syntactically fine authority, and telling them it "is not a
+  // hostname" sends them looking for a typo that is not there.
+  var INVALID_DOMAIN = '';
+  var INVALID_DOMAIN_REASON = '';
+
+  function rejectDomain(value, reason) {
+    INVALID_DOMAIN = value;
+    INVALID_DOMAIN_REASON = reason;
+    return '';
+  }
+
+  function normalizeDomain(value) {
+    if (typeof value !== 'string') return '';
+
+    var host = value.replace(/^\s+|\s+$/g, '');
+    if (!host) return '';
+
+    // A protocol-relative or absolute URL: keep only the authority. Anything
+    // the customer pasted after it — a path, a query, a fragment — is dropped,
+    // because the path is COLLECT_PATH's to decide.
+    host = host.replace(/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//, '').replace(/^\/\//, '');
+    host = host.split('/')[0].split('?')[0].split('#')[0];
+
+    // Credentials in the authority are REFUSED, not stripped. Stripping them
+    // resolves 'lr.your-domain.com@evil.test' to evil.test: the attribute still
+    // reads like the customer's own subdomain while the beacon goes somewhere
+    // else entirely. Refusing sends it down the same path as any other unusable
+    // value, which is the behaviour the check below argues for.
+    if (host.indexOf('@') !== -1) {
+      return rejectDomain(value, 'it carries credentials (user:pass@host), and the host after the "@" is where the events would actually go');
+    }
+
+    // An internationalised host reaches the wire as punycode. Convert rather
+    // than reject, so 'lr.münchen.de' works: the browser performs exactly this
+    // conversion for any URL it fetches, and the ASCII check below is what
+    // actually decides whether the value is usable. A browser too old to have
+    // URL simply fails that check, which is where it stood before.
+    if (/[^\x00-\x7F]/.test(host) && typeof URL === 'function') {
+      try {
+        // .host, not .hostname: an explicit port is legal here and hostname
+        // would silently drop it.
+        host = new URL('https://' + host).host;
+      } catch (e) {
+        // Leave it as-is; the check below rejects it.
+      }
+    }
+
+    // A host and an optional port, nothing else. Rejecting rather than
+    // repairing is deliberate: a typo that silently resolved to some other
+    // host would take that customer's events to zero with the requests still
+    // looking healthy in their network tab.
+    if (!/^[a-zA-Z0-9.-]+(:[0-9]+)?$/.test(host)) {
+      // Reported once DEBUG is resolved — this runs before it is assigned, so
+      // logError() here would be silenced even with data-debug="true".
+      return rejectDomain(value, 'it is not a hostname');
+    }
+
+    // Always https. A page on https cannot post to http anyway (mixed content
+    // is blocked outright), so honouring an http:// prefix would only turn a
+    // paste-o into silently dropped events.
+    return 'https://' + host + COLLECT_PATH;
+  }
+
+  var DOMAIN_ENDPOINT = normalizeDomain(
+    configObj.domain || (scriptTag && scriptTag.getAttribute('data-domain'))
+  );
+
+  // Precedence, most specific first:
+  //
+  //   endpoint  a full URL, including the path. The escape hatch for a proxy
+  //             on the site's own origin ('/lr/ingest'), where there is no
+  //             host to name and the path is the customer's, not ours.
+  //   domain    the host the customer CNAME'd to us. What new integrations set.
+  //   table     the stopgap for customers integrated before either existed.
+  //             Outranked by both, so anyone in it can move or revert from
+  //             their own page without waiting on a bundle release.
+  //   default   api.linkrunner.io, which a blocklist entry for our domain
+  //             kills — the reason the other three exist.
   var COLLECT_ENDPOINT = configObj.endpoint
     || (scriptTag && scriptTag.getAttribute('data-endpoint'))
+    || DOMAIN_ENDPOINT
     || MAPPED_ENDPOINT
     || DEFAULT_ENDPOINT;
 
@@ -673,28 +786,49 @@
   /**
    * Should a failed send be retried against the default endpoint?
    *
-   * Only for a first-party endpoint, and only for the failures that mean "this
-   * host is not serving the collector":
+   * Only for a non-default endpoint, and only for statuses OUR OWN COLLECTOR
+   * NEVER RETURNS. That is the whole test, and it is checkable rather than a
+   * judgement call: POST /web/ingest answers 204, 400, 401, 413 or 500 and
+   * nothing else (backend, controllers/web-collect.ts). A status outside that
+   * set cannot have come from the collector, so nothing was enqueued and a
+   * retry cannot double-count.
    *
-   *   status 0    the request never completed — DNS, TLS, a refused CORS
+   *   0           the request never completed — DNS, TLS, a refused CORS
    *               preflight, or a blocker cancelling it
+   *   403         something in FRONT of the host refused it: a WAF rule, a bot
+   *               filter, an auth proxy. Ours never answers 403.
    *   404 / 405   the host answered but nothing is routed to /web/ingest. 405
    *               is specifically the LB's branded-link handler, which is
    *               GET-only; it is what a customer host returns before the
    *               collector route ships.
+   *   502 / 503   a gateway with nothing behind it. The request did not reach
+   *               an application at all.
    *
-   * This is what makes an entry in FIRST_PARTY_ENDPOINTS safe to ship ahead of
-   * the routing it depends on. Without it, adding a host whose /web/ingest is
-   * not live yet takes that customer's events to zero.
+   * This is what makes a first-party host safe to name before the routing it
+   * depends on is live. Without it, pointing data-domain at a host whose
+   * /web/ingest is not serving yet takes that customer's events to zero.
    *
-   * Deliberately NOT 400 or 5xx. Those come from our own backend, which both
-   * hosts reach: 400 means it read the payload and rejected it, and the retry
-   * would be rejected identically; 5xx means it may already have enqueued the
-   * event, and retrying elsewhere would double-count it.
+   * The set widened when data-domain shipped, and for a reason: the host used
+   * to be one WE had verified by hand before adding a table entry, and is now
+   * whatever the customer put in their script tag. Their CDN, WAF and auth
+   * proxy are in the path now, and those speak 403 and 502 where our collector
+   * never would.
+   *
+   * Deliberately NOT retried — each is either the collector answering or
+   * indistinguishable from it:
+   *
+   *   400 / 401   the collector read the request and rejected it: bad payload,
+   *   / 413       unknown token, too large. The retry is rejected identically.
+   *   500         our own handler's catch block.
+   *   504         a timeout is the one gateway status that can mean the request
+   *               WAS processed and only the response was lost. Retrying it
+   *               would double-count the event.
    */
+  var RETRYABLE_STATUSES = { 0: true, 403: true, 404: true, 405: true, 502: true, 503: true };
+
   function shouldFallBack(endpoint, status) {
     if (endpoint === DEFAULT_ENDPOINT) return false;
-    return status === 0 || status === 404 || status === 405;
+    return RETRYABLE_STATUSES[status] === true;
   }
 
   function sendTo(endpoint, json) {
@@ -1096,7 +1230,7 @@
     var payload = buildPayload('identify', 'identify', null);
     send(payload);
   };
-  window.lr._version = '0.1.14';
+  window.lr._version = '0.1.15';
 
   // Replay queued events
   if (existingQueue.length) log('Replaying ' + existingQueue.length + ' queued event(s)');
@@ -1114,6 +1248,11 @@
   // ============================================================
   // INITIALIZATION
   // ============================================================
+
+  if (INVALID_DOMAIN) {
+    logError('Ignoring data-domain "' + INVALID_DOMAIN + '": ' + INVALID_DOMAIN_REASON + '. '
+      + 'Expected a host such as "lr.your-domain.com"; sending to ' + COLLECT_ENDPOINT + ' instead.');
+  }
 
   log('Initialized', { token: TOKEN.slice(0, 8) + '...', endpoint: COLLECT_ENDPOINT, spa: SPA_ENABLED });
 

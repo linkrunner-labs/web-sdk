@@ -95,9 +95,17 @@ Events can be queued before the script loads — they'll be replayed automatical
 | Attribute       | Required | Description                                          | Default                                |
 | --------------- | -------- | ---------------------------------------------------- | -------------------------------------- |
 | `data-token`    | Yes      | Your Linkrunner project token                        | —                                      |
-| `data-endpoint` | No       | Where events are posted. See [First-party collection](#first-party-collection-recommended) | `https://api.linkrunner.io/web/ingest`, or your own subdomain if we have one on file for your token |
+| `data-domain`   | No       | **Your own collection subdomain**, e.g. `lr.your-domain.com`. A host, not a URL — we add the path. See [First-party collection](#first-party-collection-recommended) | — |
+| `data-endpoint` | No       | A full URL or same-origin path. Only for a proxy you run yourself; overrides `data-domain` | — |
 | `data-spa`      | No       | Set to `"false"` to disable SPA mode                 | `true`                                 |
 | `data-debug`    | No       | `"true"` / `"false"` to force debug mode             | Auto                                   |
+
+With neither set, events go to `https://api.linkrunner.io/web/ingest` — or to
+your own subdomain, if we have one on file for your token.
+
+`data-domain` takes the **host only**. The collector's path belongs to us and
+has moved once already (out from under blocklist rules matching the word
+"collect"); naming only the host means you follow the next move for free.
 
 ### JavaScript config object
 
@@ -107,6 +115,7 @@ You can also configure via `window.LinkrunnerConfig` before the script loads:
 <script>
   window.LinkrunnerConfig = {
     token: 'YOUR_PROJECT_TOKEN',
+    domain: 'lr.your-domain.com', // optional, your first-party collection host
     spa: true,  // optional, default true
     debug: true // optional, auto-detected on localhost
   }
@@ -214,29 +223,88 @@ export default {
 
 ### Option 2: a subdomain pointed at us (no proxy to run)
 
-If you would rather not run a proxy, delegate a subdomain instead. Add it under
-**Settings → Manage Domains** in the dashboard, then point it at us:
+If you would rather not run a proxy, delegate a subdomain instead. Four steps,
+one of which is a single attribute on the tag you already have.
+
+#### 1. Register the subdomain
+
+In the dashboard, go to **Settings → Manage Domains** and add the subdomain you
+want to collect from, for example `lr.your-domain.com`.
+
+This is not optional bookkeeping: we issue the TLS certificate on first request
+only for subdomains registered against your project, so an unregistered host
+never gets one.
+
+#### 2. Point it at us
+
+Add a CNAME record with your DNS provider:
 
 ```
 lr.your-domain.com.  CNAME  api.linkrunner.io.
 ```
 
-We issue the certificate automatically on first request — only for subdomains
-registered against your project — and serve the collector from it.
+#### 3. Name it with `data-domain`
 
-**Change one attribute.** Point `data-endpoint` at your subdomain:
+Add one attribute to the script tag you already have:
 
 ```html
 <script
   src="https://cdn.linkrunner.io/web/v1/lr.js"
   data-token="YOUR_PROJECT_TOKEN"
-  data-endpoint="https://lr.your-domain.com/web/ingest"
+  data-domain="lr.your-domain.com"
+  defer
 ></script>
 ```
 
+With the Next.js component:
+
 ```tsx
-<LinkrunnerScript token="YOUR_PROJECT_TOKEN" endpoint="https://lr.your-domain.com/web/ingest" />
+<LinkrunnerScript token="YOUR_PROJECT_TOKEN" domain="lr.your-domain.com" />
 ```
+
+Or through the global config, set before the script loads:
+
+```html
+<script>
+  window.LinkrunnerConfig = {
+    token: 'YOUR_PROJECT_TOKEN',
+    domain: 'lr.your-domain.com',
+  }
+</script>
+<script src="https://cdn.linkrunner.io/web/v1/lr.js" defer></script>
+```
+
+That is the whole change: from that page load on, every event is posted to
+`https://lr.your-domain.com/web/ingest` instead of to us.
+
+Give it the **host**, not a URL. `https://`, a trailing slash, or the full
+endpoint URL are all accepted and normalised to the same thing, but a value that
+is not a hostname is ignored rather than guessed at — with `data-debug="true"`
+the console says so, and events keep flowing to the default meanwhile. An
+internationalised host is converted to punycode for you. Use `data-endpoint`
+only for Option 1, where the path is yours rather than ours; it overrides
+`data-domain` when both are set.
+
+#### 4. Verify
+
+**Check the host actually serves the collector** before you rely on it. A CNAME
+and a certificate are not enough on their own, and anything you put in front of
+the subdomain — a WAF, a bot filter, an auth proxy — sits in the path too:
+
+```
+curl -i -X OPTIONS -H 'Origin: https://your-domain.com' \
+  -H 'Access-Control-Request-Method: POST' https://lr.your-domain.com/web/ingest
+```
+
+Expect `204` with an `access-control-allow-origin` header. Then load your site
+and confirm in the **Network** tab that event POSTs go to
+`https://lr.your-domain.com/web/ingest`.
+
+**Two requests per event** — one to your subdomain, one to `api.linkrunner.io` —
+means the subdomain is not serving `/web/ingest` yet. No events are lost, because
+the SDK retries on our domain (see below), but each one costs a doomed round trip
+until it is fixed. Check the CNAME, that the domain is registered in the
+dashboard, and that nothing in front of the subdomain is refusing the POST.
 
 The script keeps loading from our CDN, which is deliberate: it is the beacon
 that gets blocked, not the bundle. If you would rather serve the bundle
@@ -258,20 +326,31 @@ rewrite, not when you can.
 Tell us the subdomain and we will ship the mapping inside the bundle, keyed to
 your project token. Nothing on your side changes: the bundle is served behind a
 `max-age=0, must-revalidate` alias, so your pages pick it up on their next load.
-It does not lock you in either — `data-endpoint` still wins over it, so you can
-move or revert yourself later without waiting on a release from us.
+It does not lock you in either — `data-domain` and `data-endpoint` both win over
+it, so you can move or revert yourself later without waiting on a release from
+us.
+
+This is a stopgap for teams who cannot get a page change shipped, not the normal
+path. If you can edit the script tag, use `data-domain`: it takes effect on your
+next deploy instead of ours, and it cannot go stale on our side the way an entry
+in the bundle can.
 
 #### If a first-party endpoint stops working
 
 You do not lose events. When the request fails outright — DNS, TLS, a refused
-CORS preflight, a blocker cancelling it — or the host answers `404` or `405`,
-the SDK retries once against `https://api.linkrunner.io/web/ingest`. Two
-requests per event in your network tab means the first-party host is not routing
-`/web/ingest`; fix that and the second one stops.
+CORS preflight, a blocker cancelling it — or the host answers `403`, `404`,
+`405`, `502` or `503`, the SDK retries once against
+`https://api.linkrunner.io/web/ingest`. Two requests per event in your network
+tab means something on the first-party host is not serving `/web/ingest`: it is
+unrouted, or a WAF or auth proxy in front of it is refusing the request. Fix
+that and the second one stops.
 
-A `400` or a `5xx` is deliberately **not** retried. Both come from the collector
-itself rather than from the routing in front of it, so a retry would either be
-rejected identically or double-count an event that was already accepted.
+The retried statuses are exactly the ones our collector never returns, which is
+what makes the retry safe: if it did not come from the collector, nothing was
+recorded and nothing can be double-counted. `400`, `401`, `413`, `500` and `504`
+are deliberately **not** retried — those are the collector answering, and a
+retry would either be rejected identically or double-count an event it had
+already accepted.
 
 ### Preserving the visitor's IP (Option 1)
 
@@ -308,6 +387,35 @@ why the path should be yours rather than ours. Safari's ITP still caps
 script-writable storage regardless of who serves it. For conversions that must
 not be lost — payments, signups — send them server-to-server from your backend,
 where no blocker participates at all.
+
+## What the collector checks
+
+A request to `/web/ingest` is **validated, not authenticated**. The difference
+matters, and the two are easy to conflate:
+
+| Check | Behaviour |
+| ----- | --------- |
+| Token present | Body must carry `token` as a non-empty string, plus at least one of `event_type` / `event_name`. Otherwise `400`. |
+| Token known | Looked up as a `WEB_SDK_TOKEN`. Unknown token → `401`. Nothing is ingested without a valid one. |
+| Size | `413` above 64 KB, and every string field is truncated at 2048 characters. |
+| Rate | **None.** There is no rate limiter on `/web/ingest` today. |
+| Origin | CORS on `/web` reflects any origin, deliberately — every customer site has to be able to post to it. So CORS restricts nothing here. |
+
+So a token is genuinely required, and posting without one fails. But the token is
+**public by design**: it sits in the page source of every site running the SDK,
+as `data-token="..."`. Anyone who reads your HTML can post events with it. The
+`401` proves a token exists, not that the sender is you. There is also no auth
+middleware on the route — the token check lives inside the handler itself.
+
+Payload encryption does not change this either (see below): the SDK holds only a
+public key, so anyone can produce a valid envelope. A sealed payload is
+confidential, not attributable.
+
+**If an event has to be trustworthy** — a payment, an entitlement change,
+anything you would not want a stranger to be able to fabricate — send it
+server-to-server from your backend, where you hold a secret the browser never
+sees. Client-side collection is the right tool for behavioural analytics and the
+wrong one for anything you must be able to prove.
 
 ## Payload encryption (optional)
 
