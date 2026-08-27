@@ -8,13 +8,25 @@ const CDN_SCRIPT_SRC = 'https://cdn.linkrunner.io/web/v1/lr.js'
 interface LinkrunnerScriptProps {
   token: string
   /**
-   * Where events are posted. Defaults to our API.
+   * Your own collection host — the subdomain you CNAME'd to
+   * `api.linkrunner.io`, e.g. `'lr.your-domain.com'`.
    *
-   * Set this to a path on your own domain — `'/lr/ingest'` — when you proxy
-   * collection through your own origin. That is what makes the request
-   * first-party, and first-party is what survives an ad blocker: blocklists
-   * match the request's DOMAIN, not only its path, so no path we pick can
-   * outrun a rule written against ours.
+   * This is what survives an ad blocker: blocklists match the request's
+   * DOMAIN, not only its path, so no path we pick can outrun a rule written
+   * against ours. Posting from a host on your own site has no rule to match.
+   *
+   * A host, not a URL — the collector's path is ours to choose and has moved
+   * before, and naming only the host means you follow it automatically.
+   */
+  domain?: string
+  /**
+   * Where events are posted, as a full URL or a same-origin path. Defaults to
+   * our API, and overrides `domain` when both are set.
+   *
+   * Reach for this only when you proxy collection through your own origin —
+   * `'/lr/ingest'` — where there is no host to name. If you delegated a
+   * subdomain to us, set `domain` instead: it needs no path, so it keeps
+   * working when ours changes.
    */
   endpoint?: string
   /**
@@ -31,6 +43,7 @@ interface LinkrunnerScriptProps {
 
 export function LinkrunnerScript({
   token,
+  domain,
   endpoint,
   scriptSrc = CDN_SCRIPT_SRC,
   spa,
@@ -38,6 +51,10 @@ export function LinkrunnerScript({
 }: LinkrunnerScriptProps) {
   const dataAttrs: Record<string, string> = {
     'data-token': token,
+  }
+
+  if (domain) {
+    dataAttrs['data-domain'] = domain
   }
 
   if (endpoint) {
