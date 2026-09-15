@@ -1148,7 +1148,42 @@
     payload.ft_traffic_source_type = ftTraffic.ft_traffic_source_type;
     payload.ft_traffic_source_name = ftTraffic.ft_traffic_source_name;
 
+    saveContext(payload, [utms, ftUtms, clickIds, ftClickIds]);
     return payload;
+  }
+
+  // ============================================================
+  // CONTEXT RECORD (lr_ctx), read by the Shopify checkout pixel
+  // ============================================================
+
+  // The checkout pixel runs in Shopify's sandbox, never loads this SDK, and can only
+  // read storage. Everything it needs is kept in this one record so the rest of the
+  // storage above stays internal and free to change between releases. The record's
+  // shape is a public contract (docs: sdk/shopify.mdx): add fields, never rename or
+  // remove them. lr_vid is also read directly by the Shopify cart snippet.
+  //
+  // Refreshed on every event, so a shopper who reaches checkout from the cart page
+  // hands the pixel state that is seconds old. The pixel ages out last-touch UTMs
+  // itself from `t`, for the shopper who lands on checkout straight from an email.
+  var CONTEXT_ENDPOINT = (function() {
+    try { return new URL(COLLECT_ENDPOINT, location.href).href; } catch (e) { return COLLECT_ENDPOINT; }
+  })();
+
+  function saveContext(payload, groups) {
+    var fields = {
+      visitor_id: payload.visitor_id,
+      session_id: payload.session_id,
+      user_id: payload.user_id,
+      traffic_source_type: payload.traffic_source_type,
+      traffic_source_name: payload.traffic_source_name,
+      ft_traffic_source_type: payload.ft_traffic_source_type,
+      ft_traffic_source_name: payload.ft_traffic_source_name
+    };
+    for (var g = 0; g < groups.length; g++) {
+      var keys = Object.keys(groups[g]);
+      for (var m = 0; m < keys.length; m++) fields[keys[m]] = groups[g][keys[m]];
+    }
+    safeSet(localStorage, 'lr_ctx', JSON.stringify({ v: 1, t: Date.now(), endpoint: CONTEXT_ENDPOINT, fields: fields }));
   }
 
   // ============================================================
@@ -1230,7 +1265,7 @@
     var payload = buildPayload('identify', 'identify', null);
     send(payload);
   };
-  window.lr._version = '0.1.15';
+  window.lr._version = '0.1.16';
 
   // Replay queued events
   if (existingQueue.length) log('Replaying ' + existingQueue.length + ' queued event(s)');
