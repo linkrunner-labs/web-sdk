@@ -661,7 +661,7 @@ The SDK automatically classifies traffic into these source types:
 
 | Type             | Detected via                                     |
 | ---------------- | ------------------------------------------------ |
-| `paid_search`    | gclid, gbraid, wbraid, msclkid, or UTM medium   |
+| `paid_search`    | gclid, gbraid, wbraid, oppref (ChatGPT Ads), msclkid, or UTM medium |
 | `paid_social`    | fbclid, ttclid, twclid, li_fat_id, or UTM medium |
 | `paid_display`   | dclid or UTM medium                              |
 | `paid_affiliate` | irclickid or UTM medium                          |

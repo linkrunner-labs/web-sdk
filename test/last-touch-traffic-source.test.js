@@ -96,3 +96,33 @@ test('first-touch is preserved and the stored value tracks the payload on return
   assert.strictEqual(returnSession.getItem('lr_ts_type'), later.traffic_source_type);
   assert.strictEqual(returnSession.getItem('lr_ts_name'), later.traffic_source_name);
 });
+
+test('a ChatGPT Ads click (oppref) is paid_search chatgpt and oppref is sent', function () {
+  var sdk = loadSdk({
+    url: 'https://sidsfarm.com/?oppref=gAAAA_test_click',
+    referrer: 'https://chatgpt.com/',
+    clock: createClock(),
+    localStorage: createStorage(),
+    sessionStorage: createStorage(),
+  });
+  var view = sdk.pageView();
+
+  // Without the click id, the chatgpt.com referrer would classify this as ai_search.
+  assert.strictEqual(view.traffic_source_type, 'paid_search');
+  assert.strictEqual(view.traffic_source_name, 'chatgpt');
+  assert.strictEqual(view.oppref, 'gAAAA_test_click');
+  assert.strictEqual(view.ft_oppref, 'gAAAA_test_click');
+});
+
+test('Meta and Google click ids keep precedence over a stray oppref', function () {
+  var sdk = loadSdk({
+    url: 'https://sidsfarm.com/?fbclid=IwAR_test&oppref=gAAAA_stale',
+    clock: createClock(),
+    localStorage: createStorage(),
+    sessionStorage: createStorage(),
+  });
+  var view = sdk.pageView();
+
+  assert.strictEqual(view.traffic_source_type, 'paid_social');
+  assert.strictEqual(view.traffic_source_name, 'meta');
+});
