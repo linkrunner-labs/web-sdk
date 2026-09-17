@@ -257,7 +257,10 @@
 
   var CLICK_ID_KEYS = [
     'gclid', 'gbraid', 'wbraid', 'fbclid', 'fbc', 'fbp',
-    'ttclid', 'twclid', 'msclkid', 'li_fat_id', 'dclid', 'irclickid'
+    'ttclid', 'twclid', 'msclkid', 'li_fat_id', 'dclid', 'irclickid',
+    // ChatGPT Ads (OpenAI) click id. The ChatGPT pixel reads it for itself, but the
+    // Conversions API does not, so Linkrunner persists it for web postbacks.
+    'oppref'
   ];
 
   var AI_SEARCH_DOMAINS = {
@@ -659,6 +662,9 @@
     // 1. Click ID based (paid traffic)
     if (clickIds.gclid || clickIds.gbraid || clickIds.wbraid) return { type: 'paid_search', name: 'google' };
     if (clickIds.fbclid) return { type: 'paid_social', name: 'meta' };
+    // After Google and Meta: a landing URL re-shared with its query string must not
+    // relabel another network's click as ChatGPT.
+    if (clickIds.oppref) return { type: 'paid_search', name: 'chatgpt' };
     if (clickIds.msclkid) return { type: 'paid_search', name: 'microsoft' };
     if (clickIds.ttclid) return { type: 'paid_social', name: 'tiktok' };
     if (clickIds.twclid) return { type: 'paid_social', name: 'twitter' };
