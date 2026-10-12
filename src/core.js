@@ -263,6 +263,18 @@
     'oppref'
   ];
 
+  // Google auto-tagging puts the campaign id (gad_campaignid) on the landing URL only,
+  // next to the click id. Persisting it with the click lets an event on a later page,
+  // or on a payment gateway's return page, report its Google campaign. It is not a
+  // click id of its own: it belongs to the Google click that carried it, so every new
+  // Google click replaces it, and a Google click without one clears it rather than
+  // inheriting the previous click's campaign.
+  var GOOGLE_CLICK_ID_KEYS = ['gclid', 'gbraid', 'wbraid'];
+  var GOOGLE_CAMPAIGN_KEY = 'gad_campaignid';
+
+  // Everything persisted and sent per click: the click ids plus the Google campaign.
+  var PERSISTED_CLICK_KEYS = CLICK_ID_KEYS.concat([GOOGLE_CAMPAIGN_KEY]);
+
   var AI_SEARCH_DOMAINS = {
     'chatgpt.com': 'chatgpt', 'chat.openai.com': 'chatgpt',
     'perplexity.ai': 'perplexity',
@@ -468,8 +480,30 @@
 
   // Expire old click IDs on init
   function expireOldClickIds() {
-    for (var i = 0; i < CLICK_ID_KEYS.length; i++) {
-      getClickId(CLICK_ID_KEYS[i]); // triggers expiry check
+    for (var i = 0; i < PERSISTED_CLICK_KEYS.length; i++) {
+      getClickId(PERSISTED_CLICK_KEYS[i]); // triggers expiry check
+    }
+  }
+
+  function hasGoogleClickId(ids) {
+    for (var i = 0; i < GOOGLE_CLICK_ID_KEYS.length; i++) {
+      if (ids(GOOGLE_CLICK_ID_KEYS[i])) return true;
+    }
+    return false;
+  }
+
+  // A landing that carries a Google click rewrites the stored campaign as a whole: the
+  // click's gad_campaignid, or nothing. First touch takes it only from the visitor's
+  // first Google click, so ft_gad_campaignid never pairs with another click's ft_gclid.
+  function persistGoogleCampaign(params, hadFirstTouchGoogleClick) {
+    if (!hasGoogleClickId(function (key) { return params[key]; })) return;
+
+    var campaignId = params[GOOGLE_CAMPAIGN_KEY] || '';
+    if (campaignId) {
+      setClickId(GOOGLE_CAMPAIGN_KEY, campaignId);
+      if (!hadFirstTouchGoogleClick) setFirstTouchClickId(GOOGLE_CAMPAIGN_KEY, campaignId);
+    } else {
+      safeRemove(localStorage, 'lr_' + GOOGLE_CAMPAIGN_KEY);
     }
   }
 
@@ -552,6 +586,8 @@
     var foundUtms = {};
     var foundClickIds = {};
     var newClickIdInUrl = false;
+    // Read before the click ids below write this landing's own first touch.
+    var hadFirstTouchGoogleClick = hasGoogleClickId(getFirstTouchClickId);
 
     // UTMs → first-touch here, last-touch below (written as one set)
     for (var i = 0; i < UTM_KEYS.length; i++) {
@@ -572,6 +608,8 @@
         setFirstTouchClickId(cidKey, params[cidKey]);
       }
     }
+
+    persistGoogleCampaign(params, hadFirstTouchGoogleClick);
 
     // Meta cookies — fall back to document.cookie if not found in URL params
     if (!foundClickIds.fbp) {
@@ -640,16 +678,16 @@
 
   function getPersistedClickIds() {
     var ids = {};
-    for (var i = 0; i < CLICK_ID_KEYS.length; i++) {
-      ids[CLICK_ID_KEYS[i]] = getClickId(CLICK_ID_KEYS[i]);
+    for (var i = 0; i < PERSISTED_CLICK_KEYS.length; i++) {
+      ids[PERSISTED_CLICK_KEYS[i]] = getClickId(PERSISTED_CLICK_KEYS[i]);
     }
     return ids;
   }
 
   function getFirstTouchClickIds() {
     var ids = {};
-    for (var i = 0; i < CLICK_ID_KEYS.length; i++) {
-      ids['ft_' + CLICK_ID_KEYS[i]] = getFirstTouchClickId(CLICK_ID_KEYS[i]);
+    for (var i = 0; i < PERSISTED_CLICK_KEYS.length; i++) {
+      ids['ft_' + PERSISTED_CLICK_KEYS[i]] = getFirstTouchClickId(PERSISTED_CLICK_KEYS[i]);
     }
     return ids;
   }

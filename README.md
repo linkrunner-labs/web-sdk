@@ -630,6 +630,7 @@ Events can be queued before the script loads — they'll be replayed automatical
 | ----------------------------------------------------------------- | --------------------------------------- | ---------------------------- |
 | First-touch UTMs and click IDs (`ft_*`)                            | `localStorage`                          | Until storage is cleared     |
 | Last-touch click IDs (`gclid`, `fbclid`, …)                        | `localStorage`                          | 90 days                      |
+| Google campaign id (`gad_campaignid`), with the Google click       | `localStorage`                          | 90 days, replaced by every Google click |
 | Last-touch UTMs (`utm_source`, `utm_campaign`, `utm_id`, …)        | `sessionStorage` + `localStorage` (`lr_lt`) | 24 hours from the campaign click |
 | Visitor ID, user ID                                                | `localStorage`                          | Until storage is cleared     |
 | Session ID, session page count, entry page                         | `sessionStorage`                        | Tab session                  |
