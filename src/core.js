@@ -260,8 +260,32 @@
     'ttclid', 'twclid', 'msclkid', 'li_fat_id', 'dclid', 'irclickid',
     // ChatGPT Ads (OpenAI) click id. The ChatGPT pixel reads it for itself, but the
     // Conversions API does not, so Linkrunner persists it for web postbacks.
-    'oppref'
+    'oppref',
+    // Snapchat Ads click id, for web postbacks to the Snapchat Conversions API
+    // (LIN-3939). Stored lowercase like its neighbours; Snapchat spells it `ScCid`
+    // on the URL, which CLICK_ID_URL_ALIASES handles.
+    'sccid'
   ];
+
+  // A click id whose landing-URL spelling is not its storage key. Every other key in
+  // CLICK_ID_KEYS appears on the URL exactly as it is stored, so this is the one
+  // exception rather than a general case: Snapchat's macro is `ScCid`, and query
+  // params are read case-sensitively (getQueryParams). The lowercase and uppercase
+  // forms are accepted too, for a link built by hand or passed through a tool that
+  // normalised the case. Order is preference order.
+  var CLICK_ID_URL_ALIASES = {
+    sccid: ['ScCid', 'sccid', 'SCCID', 'sc_cid']
+  };
+
+  // The landing URL's value for a click id, honouring the aliases above.
+  function clickIdFromParams(params, key) {
+    var aliases = CLICK_ID_URL_ALIASES[key];
+    if (!aliases) return params[key];
+    for (var i = 0; i < aliases.length; i++) {
+      if (params[aliases[i]]) return params[aliases[i]];
+    }
+    return '';
+  }
 
   // Google auto-tagging puts the campaign id (gad_campaignid) on the landing URL only,
   // next to the click id. Persisting it with the click lets an event on a later page,
@@ -601,11 +625,12 @@
     // Click IDs → localStorage (last-touch with TTL)
     for (var j = 0; j < CLICK_ID_KEYS.length; j++) {
       var cidKey = CLICK_ID_KEYS[j];
-      if (params[cidKey]) {
-        if (params[cidKey] !== getClickId(cidKey)) newClickIdInUrl = true;
-        foundClickIds[cidKey] = params[cidKey];
-        setClickId(cidKey, params[cidKey]);
-        setFirstTouchClickId(cidKey, params[cidKey]);
+      var cidValue = clickIdFromParams(params, cidKey);
+      if (cidValue) {
+        if (cidValue !== getClickId(cidKey)) newClickIdInUrl = true;
+        foundClickIds[cidKey] = cidValue;
+        setClickId(cidKey, cidValue);
+        setFirstTouchClickId(cidKey, cidValue);
       }
     }
 
