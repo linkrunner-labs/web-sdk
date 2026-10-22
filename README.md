@@ -638,7 +638,8 @@ Events can be queued before the script loads — they'll be replayed automatical
 Click IDs are read from the query string under the name they are stored under, with one
 exception: Snapchat spells its click id `ScCid` on the landing URL, and it is stored and
 sent as `sccid`. Query params are matched case-sensitively, so `sccid`, `SCCID` and
-`sc_cid` are accepted as well for links built by hand.
+`sc_cid` are accepted as well for links built by hand. Reddit's `rdt_cid` needs no such
+handling: it is spelled the same way on the URL as it is stored.
 
 Last-touch UTMs are mirrored into `localStorage` because `sessionStorage` is per tab.
 A payment gateway (or a bank 3DS page) that returns the visitor in a fresh tab would
