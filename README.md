@@ -631,6 +631,7 @@ Events can be queued before the script loads — they'll be replayed automatical
 | First-touch UTMs and click IDs (`ft_*`)                            | `localStorage`                          | Until storage is cleared     |
 | Last-touch click IDs (`gclid`, `fbclid`, …)                        | `localStorage`                          | 90 days                      |
 | Google campaign id (`gad_campaignid`), with the Google click       | `localStorage`                          | 90 days, replaced by every Google click |
+| Affiliate click id (`lr_click_id`), with its `utm_id`              | `localStorage`                          | 90 days, cleared when the campaign changes (see below) |
 | Last-touch UTMs (`utm_source`, `utm_campaign`, `utm_id`, …)        | `sessionStorage` + `localStorage` (`lr_lt`) | 24 hours from the campaign click |
 | Visitor ID, user ID                                                | `localStorage`                          | Until storage is cleared     |
 | Session ID, session page count, entry page                         | `sessionStorage`                        | Tab session                  |
@@ -655,6 +656,19 @@ the traffic source now agree instead of disagreeing per tab.
 survived. This is deliberate — a campaign should not take credit for a visit a day later
 — but it is narrower than the previous behaviour, where a `sessionStorage` value lived
 as long as the tab did. Click IDs are unaffected, so the traffic source still resolves.
+
+**The affiliate click id stays paired with the `utm_id` it arrived with.** Linkrunner's
+affiliate links carry a `utm_id`, which credits the partner, and end in
+`lr_click_id=<the partner's click id>`, which the partner's postback sends back. The SDK
+stores `lr_click_id` together with that `utm_id`, and only from a URL that carries both.
+It trims the value, keeps it whole (including base64 `=` padding), and ignores a blank
+value or an unexpanded macro such as `{click_id}`. A later URL with another `lr_click_id`
+and a `utm_id` replaces it. For its 90 days it is kept across pages with no campaign
+params and pages whose UTMs repeat the `utm_id` it arrived with, which covers sites that
+copy UTMs onto their internal links, even after the last-touch UTMs have expired. It is
+cleared by a URL with a new click ID from any network, or with UTMs whose `utm_id` is
+missing or differs from the one it arrived with. `ft_lr_click_id` is written once, and
+only when the visitor had no first-touch `utm_id` or the same one as this URL.
 
 ## Traffic source detection
 
