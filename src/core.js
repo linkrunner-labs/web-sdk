@@ -264,7 +264,11 @@
     // Snapchat Ads click id, for web postbacks to the Snapchat Conversions API
     // (LIN-3939). Stored lowercase like its neighbours; Snapchat spells it `ScCid`
     // on the URL, which CLICK_ID_URL_ALIASES handles.
-    'sccid'
+    'sccid',
+    // Reddit Ads click id, for web postbacks to the Reddit Conversions API
+    // (LIN-3940). Reddit spells it `rdt_cid` on the URL, which is already the
+    // storage key, so it needs no alias.
+    'rdt_cid'
   ];
 
   // A click id whose landing-URL spelling is not its storage key. Every other key in
@@ -1354,7 +1358,7 @@
     var payload = buildPayload('identify', 'identify', null);
     send(payload);
   };
-  window.lr._version = '0.1.19';
+  window.lr._version = '0.1.20';
 
   // Replay queued events
   if (existingQueue.length) log('Replaying ' + existingQueue.length + ' queued event(s)');
