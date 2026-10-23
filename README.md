@@ -99,6 +99,7 @@ Events can be queued before the script loads — they'll be replayed automatical
 | `data-endpoint` | No       | A full URL or same-origin path. Only for a proxy you run yourself; overrides `data-domain` | — |
 | `data-spa`      | No       | Set to `"false"` to disable SPA mode                 | `true`                                 |
 | `data-debug`    | No       | `"true"` / `"false"` to force debug mode             | Auto                                   |
+| `data-hotstar-pixel-id` | No | Your JioHotstar pixel id. Loads Hotstar's pixel and forwards supported events. See [JioHotstar](#jiohotstar) | off |
 
 With neither set, events go to `https://api.linkrunner.io/web/ingest` — or to
 your own subdomain, if we have one on file for your token.
@@ -624,6 +625,41 @@ lr.track('event_name', { key: 'value' })
 
 Events can be queued before the script loads — they'll be replayed automatically once initialized.
 
+## JioHotstar
+
+A visit that lands with `?hsClkId=...` (any casing) is stored as a JioHotstar click:
+the id is kept for 90 days, sent on every event as `hsclkid` / `ft_hsclkid`, and the
+traffic source reads `paid_display` / `jiohotstar`. This needs nothing in your setup.
+
+JioHotstar Ads reports web conversions from its own pixel, so to send conversions to
+it, give the SDK your pixel id (Ads Manager, Event Tracking, Pixel Id):
+
+```html
+<script src="https://cdn.linkrunner.io/web/v1/lr.js" data-token="YOUR_PROJECT_TOKEN"
+  data-hotstar-pixel-id="YOUR_PIXEL_ID" defer></script>
+```
+
+or `hotstarPixelId` in `window.LinkrunnerConfig` (or the `hotstarPixelId` prop of `LinkrunnerScript`).
+The SDK then loads Hotstar's pixel, sends `PageView` once per load, and forwards these
+`lr.track` events (name matched ignoring case, spaces and underscores):
+
+| `lr.track(...)` name                 | Hotstar event      | Parameters forwarded                                  |
+| ------------------------------------ | ------------------ | ----------------------------------------------------- |
+| `purchase`                           | `Purchase`         | `purchase_id`, `value` (or `amount`)                  |
+| `add_to_cart`                        | `AddToCart`        | `product_id`, `value`                                 |
+| `initiate_checkout`                  | `InitiateCheckout` | `product_id`, `value`, `discount`                     |
+| `lead`, `generate_lead`              | `GenerateLead`     | `lead_id`, `value`                                    |
+| `signup`, `sign_up`                  | `SignUp`           | `subscription_id`                                     |
+| `view_content`                       | `ViewContent`      | `content_id`, `content_type`                          |
+| `search`                             | `Search`           | `search_text`                                         |
+
+`cdf1` to `cdf5` are forwarded on every event; other keys are not sent to Hotstar.
+Events with any other name go to Linkrunner only.
+
+Without a pixel id the SDK makes no request to Hotstar. If the page already runs
+Hotstar's own pixel snippet, the SDK reuses it rather than initialising it again,
+so do not also call `hspixel('track', ...)` for events you send through `lr.track`.
+
 ## Attribution storage
 
 | What                                                              | Where                                   | Lifetime                     |
@@ -664,7 +700,7 @@ The SDK automatically classifies traffic into these source types:
 | ---------------- | ------------------------------------------------ |
 | `paid_search`    | gclid, gbraid, wbraid, oppref (ChatGPT Ads), msclkid, or UTM medium |
 | `paid_social`    | fbclid, ttclid, twclid, li_fat_id, or UTM medium |
-| `paid_display`   | dclid or UTM medium                              |
+| `paid_display`   | dclid, hsClkId (JioHotstar), or UTM medium       |
 | `paid_affiliate` | irclickid or UTM medium                          |
 | `ai_search`      | Referrer from ChatGPT, Perplexity, Claude, etc.  |
 | `organic_search` | Referrer from Google, Bing, DuckDuckGo, etc.     |

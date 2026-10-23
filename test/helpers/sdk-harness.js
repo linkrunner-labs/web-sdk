@@ -77,6 +77,7 @@ function loadSdk(options) {
   var sent = [];
   var attempts = [];
   var timers = [];
+  var injectedScripts = [];
 
   // options.respond(endpoint) -> { ok, status } | 'network-error'
   // Default: every endpoint answers 200, which is what every test that does not
@@ -111,6 +112,15 @@ function loadSdk(options) {
       referrer: referrer,
       title: 'Playo',
       cookie: cookie,
+      // Third-party script loads (the Hotstar pixel) land here instead of the network.
+      createElement: function () {
+        return {};
+      },
+      head: {
+        appendChild: function (el) {
+          injectedScripts.push(el);
+        },
+      },
     },
     navigator: {
       userAgent:
@@ -172,6 +182,10 @@ function loadSdk(options) {
     devicePixelRatio: 3,
     LinkrunnerConfig: options.config || { token: 'test_token_193', spa: false, debug: false },
   };
+  // options.hspixel: a pixel the page already runs. options.preQueue: lr.track() calls made
+  // before the script loaded, the way the npm stub queues them.
+  if (options.hspixel) sandbox.hspixel = options.hspixel;
+  if (options.preQueue) sandbox.lr = { _q: options.preQueue };
   sandbox.window = sandbox;
   sandbox.self = sandbox;
 
@@ -186,6 +200,7 @@ function loadSdk(options) {
     sandbox: sandbox,
     sent: sent,
     attempts: attempts,
+    injectedScripts: injectedScripts,
     endpoints: function () {
       return attempts.map(function (a) { return a.endpoint; });
     },

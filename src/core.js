@@ -222,6 +222,12 @@
 
   var ENCRYPTION_ENABLED = !!(ENCRYPTION_PUBLIC_KEY && ENCRYPTION_KEY_ID);
 
+  // JioHotstar pixel id. Set it and the SDK loads Hotstar's own pixel and forwards the
+  // matching events to it (see the HOTSTAR PIXEL section). Empty means no Hotstar request.
+  var HOTSTAR_PIXEL_ID = String(configObj.hotstarPixelId
+    || (scriptTag && scriptTag.getAttribute('data-hotstar-pixel-id'))
+    || '').trim();
+
   var SPA_ENABLED = configObj.spa !== false
     && !(scriptTag && scriptTag.getAttribute('data-spa') === 'false');
 
@@ -260,7 +266,11 @@
     'ttclid', 'twclid', 'msclkid', 'li_fat_id', 'dclid', 'irclickid',
     // ChatGPT Ads (OpenAI) click id. The ChatGPT pixel reads it for itself, but the
     // Conversions API does not, so Linkrunner persists it for web postbacks.
-    'oppref'
+    'oppref',
+    // JioHotstar click id, from the `hsClkId` landing-URL param (stored lowercase, see
+    // normalizeHotstarClickId). Hotstar's own pixel keeps it for 7 days; this keeps it for
+    // the 90 days every other click id gets, so a later conversion still ties to the ad.
+    'hsclkid'
   ];
 
   // Google auto-tagging puts the campaign id (gad_campaignid) on the landing URL only,
@@ -581,8 +591,21 @@
   // PARAMETER PERSISTENCE — extract from URL, persist to storage
   // ============================================================
 
+  // Hotstar's pixel reads the param case-insensitively and its docs write it `hsClkId`,
+  // so accept any casing and store it under the lowercase key every other click id uses.
+  function normalizeHotstarClickId(params) {
+    var names = Object.keys(params);
+    for (var i = 0; i < names.length; i++) {
+      if (names[i] !== 'hsclkid' && names[i].toLowerCase() === 'hsclkid' && params[names[i]]) {
+        params.hsclkid = params[names[i]];
+        return;
+      }
+    }
+  }
+
   function persistParams() {
     var params = getQueryParams();
+    normalizeHotstarClickId(params);
     var foundUtms = {};
     var foundClickIds = {};
     var newClickIdInUrl = false;
@@ -708,6 +731,7 @@
     if (clickIds.twclid) return { type: 'paid_social', name: 'twitter' };
     if (clickIds.li_fat_id) return { type: 'paid_social', name: 'linkedin' };
     if (clickIds.dclid) return { type: 'paid_display', name: 'google' };
+    if (clickIds.hsclkid) return { type: 'paid_display', name: 'jiohotstar' };
     if (clickIds.irclickid) return { type: 'paid_affiliate', name: 'impact' };
 
     // 2. UTM medium based
@@ -1258,6 +1282,84 @@
     send(payload);
   }
 
+  // ============================================================
+  // HOTSTAR PIXEL (opt-in: data-hotstar-pixel-id / LinkrunnerConfig.hotstarPixelId)
+  // ============================================================
+
+  // JioHotstar Ads measures web conversions through its own browser pixel, so a conversion
+  // only reaches Hotstar if that pixel sees it. With a pixel id configured we load the
+  // pixel exactly as Hotstar's snippet does and forward the events it supports, so one
+  // lr.track() call reports to both. Hotstar documents no server-side API.
+  var HOTSTAR_PIXEL_SRC = 'https://hspx.hotstar.com/static/pixel/hspixel.js';
+
+  // Our event names, lowercased with everything but letters and digits removed, to
+  // Hotstar's standard events. PageView is not here: the base pixel sends it once on load.
+  var HOTSTAR_EVENTS = {
+    viewcontent: 'ViewContent',
+    purchase: 'Purchase',
+    addtocart: 'AddToCart',
+    initiatecheckout: 'InitiateCheckout',
+    generatelead: 'GenerateLead',
+    lead: 'GenerateLead',
+    signup: 'SignUp',
+    search: 'Search'
+  };
+
+  // The parameters Hotstar documents for those events. Anything else is not forwarded:
+  // it would be ignored at best, and a sixth custom parameter makes Hotstar fail the call.
+  var HOTSTAR_PARAMS = [
+    'content_id', 'content_type', 'purchase_id', 'value', 'product_id', 'discount',
+    'lead_id', 'subscription_id', 'search_text', 'cdf1', 'cdf2', 'cdf3', 'cdf4', 'cdf5'
+  ];
+
+  function startHotstarPixel() {
+    if (!HOTSTAR_PIXEL_ID) return;
+    try {
+      // A pixel already on the page (the site's own snippet) is reused as is: initialising
+      // it twice would double the page view.
+      if (typeof window.hspixel === 'function') {
+        log('Hotstar pixel already on the page, reusing it');
+        return;
+      }
+      var pixel = window.hspixel = function() {
+        if (pixel.process) pixel.process.apply(pixel, arguments);
+        else pixel.queue.push(arguments);
+      };
+      pixel.queue = [];
+      pixel.t = 1 * new Date();
+      var script = document.createElement('script');
+      script.async = true;
+      script.src = HOTSTAR_PIXEL_SRC;
+      (document.head || document.documentElement).appendChild(script);
+      pixel('init', HOTSTAR_PIXEL_ID);
+      pixel('track', 'PageView');
+      log('Hotstar pixel started', { pixelId: HOTSTAR_PIXEL_ID });
+    } catch (e) { logError('Failed to start the Hotstar pixel', e); }
+  }
+
+  function hotstarParams(eventData) {
+    var params = {};
+    if (!eventData || typeof eventData !== 'object') return params;
+    for (var i = 0; i < HOTSTAR_PARAMS.length; i++) {
+      var key = HOTSTAR_PARAMS[i];
+      var value = eventData[key];
+      if (key === 'value' && (value === undefined || value === null)) value = eventData.amount;
+      if (value === undefined || value === null || typeof value === 'object') continue;
+      params[key] = String(value);
+    }
+    return params;
+  }
+
+  function forwardToHotstar(eventName, eventData) {
+    if (!HOTSTAR_PIXEL_ID || typeof window.hspixel !== 'function') return;
+    try {
+      var hotstarEvent = HOTSTAR_EVENTS[eventName.toLowerCase().replace(/[^a-z0-9]/g, '')];
+      if (!hotstarEvent) return;
+      window.hspixel('track', hotstarEvent, hotstarParams(eventData));
+      log('Forwarded to Hotstar', { event: hotstarEvent });
+    } catch (e) { logError('Failed to forward event to Hotstar', e); }
+  }
+
   function trackCustomEvent(eventName, eventData) {
     log('track() called', { eventName: eventName, eventData: eventData });
     if (!eventName || typeof eventName !== 'string') {
@@ -1266,6 +1368,7 @@
     }
     var payload = buildPayload('custom', eventName, eventData || null);
     send(payload);
+    forwardToHotstar(eventName, eventData);
   }
 
   // ============================================================
@@ -1310,6 +1413,9 @@
     send(payload);
   };
   window.lr._version = '0.1.18';
+
+  // Before the replay below, so events queued ahead of the script reach Hotstar too.
+  startHotstarPixel();
 
   // Replay queued events
   if (existingQueue.length) log('Replaying ' + existingQueue.length + ' queued event(s)');
