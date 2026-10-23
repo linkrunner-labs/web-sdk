@@ -22,6 +22,11 @@ declare global {
       endpoint?: string
       spa?: boolean
       debug?: boolean
+      /**
+       * Your JioHotstar pixel id. When set, the SDK loads Hotstar's pixel and forwards
+       * the events Hotstar supports (purchase, signup, …) from `lr.track`.
+       */
+      hotstarPixelId?: string
     }
   }
 }
