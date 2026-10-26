@@ -632,6 +632,7 @@ Events can be queued before the script loads — they'll be replayed automatical
 | First-touch UTMs and click IDs (`ft_*`)                            | `localStorage`                          | Until storage is cleared     |
 | Last-touch click IDs (`gclid`, `fbclid`, …)                        | `localStorage`                          | 90 days from the click (`fbc`/`fbp`: from the last visit) |
 | Google campaign id (`gad_campaignid`), with the Google click       | `localStorage`                          | 90 days, replaced by every Google click, sent only while that click is the last click |
+| Click IDs a newer click replaced (`lr_seen`), to recognise a reload of an earlier landing | `localStorage` | 90 days from each click, 10 per click ID |
 | Last-touch UTMs (`utm_source`, `utm_campaign`, `utm_id`, …)        | `sessionStorage` + `localStorage` (`lr_lt`) | 24 hours from the campaign click |
 | Visitor ID, user ID                                                | `localStorage`                          | Until storage is cleared     |
 | Session ID, session page count, entry page                         | `sessionStorage`                        | Tab session                  |
@@ -681,9 +682,14 @@ most recent click decides the source: a Meta click after a Google click is Meta.
 other networks' click IDs are kept and still sent, because each network's conversion
 postback needs its own, and the Google campaign id is sent only while the Google click
 is the last one. A reload or a restored tab of an earlier ad landing is not a new click
-while its click ID is still stored, and its UTMs do not replace the last click's. When
-one URL carries new click IDs from two networks, a fixed order decides: Google, then
-Meta, then the rest.
+while that click is under 90 days old, even after a newer click from the same network,
+and its UTMs do not replace the last click's. Google's `gbraid` and `wbraid` are shared
+across clicks: next to a `gclid` they follow it, and on their own a repeated one is a new
+click unless the page was reloaded, reached with back/forward, or opened from the site
+itself (a repeated `gbraid` also only when it comes from Google or an app, with no
+referrer). When one URL carries new click IDs from two networks, a fixed order
+decides: Google, then Meta, then the rest. A call queued before the script loads is
+attributed to the landing it was made on.
 
 ## License
 

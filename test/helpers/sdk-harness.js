@@ -124,10 +124,14 @@ function loadSdk(options) {
     },
     screen: { width: 390, height: 844, colorDepth: 24 },
     history: { pushState: function () {}, replaceState: function () {} },
+    // options.navigationType ('reload', 'back_forward', ...) -> the navigation entry's type.
+    // options.legacyNavigationType (1 = reload, 2 = back/forward) -> performance.navigation
+    // only, as on Safari before 15.
     performance: {
-      getEntriesByType: function () {
-        return [];
+      getEntriesByType: function (type) {
+        return type === 'navigation' && options.navigationType ? [{ type: options.navigationType }] : [];
       },
+      navigation: options.legacyNavigationType ? { type: options.legacyNavigationType } : undefined,
     },
     // Pass options.crypto (e.g. require('crypto').webcrypto) to exercise the
     // payload-encryption path; the default stub has no subtle, which is what a
@@ -173,6 +177,8 @@ function loadSdk(options) {
     LinkrunnerConfig: options.config || { token: 'test_token_193', spa: false, debug: false },
   };
   sandbox.window = sandbox;
+  // options.queue -> calls made through the pre-load stub before the script ran.
+  if (options.queue) sandbox.lr = { _q: options.queue };
   sandbox.self = sandbox;
 
   vm.createContext(sandbox);

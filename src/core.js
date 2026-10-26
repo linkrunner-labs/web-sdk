@@ -285,6 +285,14 @@
   // so ids stamped this close to the newest one count as part of it.
   var SAME_CLICK_MS = 1000;
 
+  // Google's aggregated ids are shared by many clicks, like a campaign id ("non-unique",
+  // in Google's words), so a repeated value can be a new click.
+  var AGGREGATED_CLICK_KEYS = { gbraid: true, wbraid: true };
+
+  // Earlier values remembered per click id, to recognise a reload or a restored tab of an
+  // earlier landing after a newer click from the same network replaced it.
+  var EARLIER_CLICKS_PER_KEY = 10;
+
   var AI_SEARCH_DOMAINS = {
     'chatgpt.com': 'chatgpt', 'chat.openai.com': 'chatgpt',
     'perplexity.ai': 'perplexity',
@@ -485,6 +493,72 @@
     return record ? record.v : '';
   }
 
+  // Click ids a newer click replaced, as { key: [[value, clickTime], ...] }.
+  function getEarlierClickIds() {
+    try {
+      var earlier = JSON.parse(safeGet(localStorage, 'lr_seen') || '{}');
+      return earlier && typeof earlier === 'object' && !Array.isArray(earlier) ? earlier : {};
+    } catch (e) { logError('Failed to parse earlier click IDs', e); return {}; }
+  }
+
+  function getEarlierEntries(earlier, key) {
+    return Array.isArray(earlier[key]) ? earlier[key] : [];
+  }
+
+  // Keeps a replaced click for the rest of its 90 days.
+  function rememberEarlierClickId(key, record) {
+    var earlier = getEarlierClickIds();
+    var now = Date.now();
+    var kept = getEarlierEntries(earlier, key).filter(function (entry) {
+      return entry && entry[0] !== record.v && now - entry[1] <= CLICK_ID_TTL_MS;
+    });
+    kept.push([record.v, record.t]);
+    earlier[key] = kept.slice(-EARLIER_CLICKS_PER_KEY);
+    safeSet(localStorage, 'lr_seen', JSON.stringify(earlier));
+  }
+
+  function isEarlierClickId(key, value) {
+    var entries = getEarlierEntries(getEarlierClickIds(), key);
+    for (var i = 0; i < entries.length; i++) {
+      if (entries[i] && entries[i][0] === value && Date.now() - entries[i][1] <= CLICK_ID_TTL_MS) return true;
+    }
+    return false;
+  }
+
+  // Was this page reloaded, reached by back/forward, or opened from the site's own page?
+  // Safari before 15 has no navigation entry, so the older performance.navigation is the
+  // fallback (1 = reload, 2 = back/forward).
+  function isRepeatVisit() {
+    try {
+      if (getReferringDomain(document.referrer) === location.hostname) return true;
+      var entries = performance.getEntriesByType ? performance.getEntriesByType('navigation') : [];
+      if (entries && entries.length) return entries[0].type === 'reload' || entries[0].type === 'back_forward';
+      var legacy = performance.navigation && performance.navigation.type;
+      return legacy === 1 || legacy === 2;
+    } catch (e) { return false; }
+  }
+
+  // A gbraid arrives from Google's own apps and pages, which send no referrer or a Google one.
+  function isFromGoogleOrApp() {
+    var host = getReferringDomain(document.referrer);
+    return !host || /(^|\.)(google\.[a-z.]+|youtube\.com)$/.test(host);
+  }
+
+  // Is the URL's click id a new click? A click id the visitor already has, stored or
+  // replaced by a newer click, is a reload or a restored tab of that earlier landing: it
+  // keeps its click's time, so it cannot outrank a later click. An aggregated id can
+  // repeat on a genuinely new click. Next to a gclid it belongs to that click, which is
+  // unique; on its own, a known one is the same click on a repeat visit, and a known
+  // gbraid under any referrer but Google's (a payment gateway returning to the landing).
+  function isNewClick(key, value, current, params, newClickIds) {
+    var known = (current && current.v === value) || isEarlierClickId(key, value);
+    if (!AGGREGATED_CLICK_KEYS[key]) return !known;
+    if (params.gclid) return !!newClickIds.gclid;
+    if (!known) return true;
+    if (isRepeatVisit()) return false;
+    return key !== 'gbraid' || isFromGoogleOrApp();
+  }
+
   // The click ids of the visitor's last ad click, whichever network it came from
   // (LIN-3622). Every network's click id stays stored and is still sent, because each
   // network's postback needs its own; only the traffic source and the Google campaign
@@ -496,8 +570,10 @@
     for (var i = 0; i < LAST_CLICK_KEYS.length; i++) {
       var record = getClickRecord(LAST_CLICK_KEYS[i]);
       if (!record) continue;
-      records[LAST_CLICK_KEYS[i]] = record;
-      if (record.t > newest) newest = record.t;
+      // A click with no usable time still counts, as the oldest one.
+      var t = typeof record.t === 'number' && isFinite(record.t) ? record.t : 0;
+      records[LAST_CLICK_KEYS[i]] = { v: record.v, t: t };
+      if (t > newest) newest = t;
     }
     var ids = {};
     for (var key in records) {
@@ -506,16 +582,15 @@
     return ids;
   }
 
-  // Does this URL carry ad click ids, none of them the last click's? Asked once the
-  // URL's ids are stored and none of them was new, so the URL is a reload or a
-  // restored tab of an earlier ad landing.
-  function isEarlierAdLanding(params) {
+  // Is this URL a reload or a restored tab of an earlier ad landing? It carries ad click
+  // ids, none of them new and none of them the last click's.
+  function isEarlierAdLanding(params, newClickIds) {
     var lastClickIds = getLastClickIds();
     var carriesClick = false;
     for (var i = 0; i < LAST_CLICK_KEYS.length; i++) {
       var key = LAST_CLICK_KEYS[i];
       if (!params[key]) continue;
-      if (params[key] === lastClickIds[key]) return false;
+      if (newClickIds[key] || params[key] === lastClickIds[key]) return false;
       carriesClick = true;
     }
     return carriesClick;
@@ -673,10 +748,9 @@
     for (var j = 0; j < CLICK_ID_KEYS.length; j++) {
       var cidKey = CLICK_ID_KEYS[j];
       if (params[cidKey]) {
-        // Only a new value is a new click. A reload or a restored tab of an earlier ad
-        // landing whose click is still stored keeps that click's time, so it cannot
-        // outrank a later click.
-        if (params[cidKey] !== getClickId(cidKey)) {
+        var current = getClickRecord(cidKey);
+        if (isNewClick(cidKey, params[cidKey], current, params, newClickIds)) {
+          if (current && current.v !== params[cidKey]) rememberEarlierClickId(cidKey, current);
           newClickIds[cidKey] = true;
           setClickId(cidKey, params[cidKey]);
         }
@@ -684,7 +758,8 @@
         setFirstTouchClickId(cidKey, params[cidKey]);
       }
     }
-    var newClickIdInUrl = Object.keys(newClickIds).length > 0;
+    // fbc/fbp in a URL (a cross-domain hop passing the pixel's ids on) are not an ad click.
+    var newClickIdInUrl = LAST_CLICK_KEYS.some(function (key) { return newClickIds[key]; });
 
     persistGoogleCampaign(params, newClickIds, hadFirstTouchGoogleClick);
 
@@ -697,6 +772,22 @@
         setFirstTouchClickId('fbp', fbpCookie);
       }
     }
+
+    // fbc is the Meta click in Meta's format, fb.1.<click time>.<fbclid>. Written for a new
+    // fbclid before the cookie fallback below, so the landing event does not pair the new
+    // fbclid with an older click's _fbc, and never on a reload, which would re-date it.
+    if (params.fbclid && !foundClickIds.fbc) {
+      var fbclidRecord = getClickRecord('fbclid');
+      var isStoredClick = !!fbclidRecord && fbclidRecord.v === params.fbclid;
+      if (newClickIds.fbclid || (isStoredClick && !getCookie('_fbc'))) {
+        var clickTime = isStoredClick && typeof fbclidRecord.t === 'number' ? fbclidRecord.t : Date.now();
+        var fbcValue = 'fb.1.' + clickTime + '.' + params.fbclid;
+        setCookie('_fbc', fbcValue, 90);
+        foundClickIds.fbc = fbcValue;
+        setClickId('fbc', fbcValue);
+        setFirstTouchClickId('fbc', fbcValue);
+      }
+    }
     if (!foundClickIds.fbc) {
       var fbcCookie = getCookie('_fbc');
       if (fbcCookie) {
@@ -706,21 +797,10 @@
       }
     }
 
-    // Write _fbc cookie from fbclid in Meta's standard format
-    if (params.fbclid) {
-      var fbcValue = 'fb.1.' + Date.now() + '.' + params.fbclid;
-      setCookie('_fbc', fbcValue, 90);
-      if (!foundClickIds.fbc) {
-        foundClickIds.fbc = fbcValue;
-        setClickId('fbc', fbcValue);
-        setFirstTouchClickId('fbc', fbcValue);
-      }
-    }
-
     // Only an arrival that actually carries campaign params rewrites last-touch state.
     // Navigation with no campaign params — a payment gateway sending the visitor back —
     // leaves the stored set alone, which is what keeps attribution across the redirect.
-    if (Object.keys(foundUtms).length && !newClickIdInUrl && isEarlierAdLanding(params)) {
+    if (Object.keys(foundUtms).length && isEarlierAdLanding(params, newClickIds)) {
       // A reload or a restored tab of an earlier ad landing: its UTMs belong to that
       // click, so they must not relabel the last click's.
       log('UTM params ignored, this landing is not the last click', foundUtms);
@@ -1401,6 +1481,12 @@
   };
   window.lr._version = '0.1.19';
 
+  // The landing's click ids and UTMs before any queued call is replayed: a call queued
+  // before the script loaded was most likely made on this landing, so it belongs to its
+  // click, not to the visitor's previous one.
+  expireOldClickIds();
+  persistParams();
+
   // Replay queued events
   if (existingQueue.length) log('Replaying ' + existingQueue.length + ' queued event(s)');
   for (var qi = 0; qi < existingQueue.length; qi++) {
@@ -1424,9 +1510,6 @@
   }
 
   log('Initialized', { token: TOKEN.slice(0, 8) + '...', endpoint: COLLECT_ENDPOINT, spa: SPA_ENABLED });
-
-  expireOldClickIds();
-  persistParams();
 
   // After new visitor flag is read, clear it for subsequent events
   visitor.isNew = false;
