@@ -8,6 +8,7 @@ Web attribution SDK for [Linkrunner](https://linkrunner.io) — track page views
 - First-touch and last-touch UTM attribution
 - Last-touch UTMs survive payment gateway redirects and tab loss for 24 hours
 - Click ID persistence (gclid, fbclid, ttclid, etc.) with 90-day TTL
+- The last ad click decides the traffic source, whichever network it came from
 - Traffic source classification (paid, organic, social, AI search, referral, direct)
 - AI search engine detection (ChatGPT, Perplexity, Claude, Gemini, and more)
 - Bot detection
@@ -629,8 +630,8 @@ Events can be queued before the script loads — they'll be replayed automatical
 | What                                                              | Where                                   | Lifetime                     |
 | ----------------------------------------------------------------- | --------------------------------------- | ---------------------------- |
 | First-touch UTMs and click IDs (`ft_*`)                            | `localStorage`                          | Until storage is cleared     |
-| Last-touch click IDs (`gclid`, `fbclid`, …)                        | `localStorage`                          | 90 days                      |
-| Google campaign id (`gad_campaignid`), with the Google click       | `localStorage`                          | 90 days, replaced by every Google click |
+| Last-touch click IDs (`gclid`, `fbclid`, …)                        | `localStorage`                          | 90 days from the click (`fbc`/`fbp`: from the last visit) |
+| Google campaign id (`gad_campaignid`), with the Google click       | `localStorage`                          | 90 days, replaced by every Google click, sent only while that click is the last click |
 | Last-touch UTMs (`utm_source`, `utm_campaign`, `utm_id`, …)        | `sessionStorage` + `localStorage` (`lr_lt`) | 24 hours from the campaign click |
 | Visitor ID, user ID                                                | `localStorage`                          | Until storage is cleared     |
 | Session ID, session page count, entry page                         | `sessionStorage`                        | Tab session                  |
@@ -639,7 +640,8 @@ Last-touch UTMs are mirrored into `localStorage` because `sessionStorage` is per
 A payment gateway (or a bank 3DS page) that returns the visitor in a fresh tab would
 otherwise drop every `utm_*` value, so the purchase arrives with no campaign attached
 even though the click IDs still identify the network. The mirrored copy is replaced
-whenever a URL carries new UTMs, dropped when a URL carries a new click ID with no UTMs,
+whenever a URL carries new UTMs (except an earlier ad landing reopened after a later
+click), emptied when a URL carries a new click ID with no UTMs,
 and expires 24 hours after the campaign click. First-touch values are never affected.
 
 Two consequences of the `localStorage` mirror worth knowing:
@@ -673,6 +675,15 @@ The SDK automatically classifies traffic into these source types:
 | `campaign`       | UTM parameters present                           |
 | `referral`       | External referrer domain                         |
 | `direct`         | No referrer or parameters                        |
+
+Click IDs come first. When a visitor has clicked ads from more than one network, the
+most recent click decides the source: a Meta click after a Google click is Meta. The
+other networks' click IDs are kept and still sent, because each network's conversion
+postback needs its own, and the Google campaign id is sent only while the Google click
+is the last one. A reload or a restored tab of an earlier ad landing is not a new click
+while its click ID is still stored, and its UTMs do not replace the last click's. When
+one URL carries new click IDs from two networks, a fixed order decides: Google, then
+Meta, then the rest.
 
 ## License
 

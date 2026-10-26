@@ -275,6 +275,16 @@
   // Everything persisted and sent per click: the click ids plus the Google campaign.
   var PERSISTED_CLICK_KEYS = CLICK_ID_KEYS.concat([GOOGLE_CAMPAIGN_KEY]);
 
+  // The click ids ranked by when they were clicked, to find the last click. fbc and fbp
+  // are left out: they are copied from the Meta pixel's cookies on every page view, so
+  // their stamps say when the visitor was last seen, not when they clicked. The Meta
+  // click itself is fbclid, which is ranked.
+  var LAST_CLICK_KEYS = CLICK_ID_KEYS.filter(function (key) { return key !== 'fbc' && key !== 'fbp'; });
+
+  // Ids stored by one landing are one click. They are written a few milliseconds apart,
+  // so ids stamped this close to the newest one count as part of it.
+  var SAME_CLICK_MS = 1000;
+
   var AI_SEARCH_DOMAINS = {
     'chatgpt.com': 'chatgpt', 'chat.openai.com': 'chatgpt',
     'perplexity.ai': 'perplexity',
@@ -454,17 +464,61 @@
     safeSet(localStorage, 'lr_' + key, JSON.stringify({ v: value, t: Date.now() }));
   }
 
-  function getClickId(key) {
+  // The stored click as { v, t }, or null when there is none or it is past the TTL. t is
+  // when the click arrived; for fbc/fbp, copied from cookies on every page view, it is the
+  // last visit.
+  function getClickRecord(key) {
     try {
       var raw = safeGet(localStorage, 'lr_' + key);
-      if (!raw) return '';
+      if (!raw) return null;
       var parsed = JSON.parse(raw);
       if (Date.now() - parsed.t > CLICK_ID_TTL_MS) {
         safeRemove(localStorage, 'lr_' + key);
-        return '';
+        return null;
       }
-      return parsed.v || '';
-    } catch (e) { logError('Failed to parse click ID ' + key, e); return ''; }
+      return parsed.v ? parsed : null;
+    } catch (e) { logError('Failed to parse click ID ' + key, e); return null; }
+  }
+
+  function getClickId(key) {
+    var record = getClickRecord(key);
+    return record ? record.v : '';
+  }
+
+  // The click ids of the visitor's last ad click, whichever network it came from
+  // (LIN-3622). Every network's click id stays stored and is still sent, because each
+  // network's postback needs its own; only the traffic source and the Google campaign
+  // follow the last click. When one landing carried two networks' ids,
+  // classifyTrafficSource's order decides between them, as it always has.
+  function getLastClickIds() {
+    var records = {};
+    var newest = -Infinity;
+    for (var i = 0; i < LAST_CLICK_KEYS.length; i++) {
+      var record = getClickRecord(LAST_CLICK_KEYS[i]);
+      if (!record) continue;
+      records[LAST_CLICK_KEYS[i]] = record;
+      if (record.t > newest) newest = record.t;
+    }
+    var ids = {};
+    for (var key in records) {
+      if (records[key].t >= newest - SAME_CLICK_MS) ids[key] = records[key].v;
+    }
+    return ids;
+  }
+
+  // Does this URL carry ad click ids, none of them the last click's? Asked once the
+  // URL's ids are stored and none of them was new, so the URL is a reload or a
+  // restored tab of an earlier ad landing.
+  function isEarlierAdLanding(params) {
+    var lastClickIds = getLastClickIds();
+    var carriesClick = false;
+    for (var i = 0; i < LAST_CLICK_KEYS.length; i++) {
+      var key = LAST_CLICK_KEYS[i];
+      if (!params[key]) continue;
+      if (params[key] === lastClickIds[key]) return false;
+      carriesClick = true;
+    }
+    return carriesClick;
   }
 
   function setFirstTouchClickId(key, value) {
@@ -492,11 +546,12 @@
     return false;
   }
 
-  // A landing that carries a Google click rewrites the stored campaign as a whole: the
-  // click's gad_campaignid, or nothing. First touch takes it only from the visitor's
-  // first Google click, so ft_gad_campaignid never pairs with another click's ft_gclid.
-  function persistGoogleCampaign(params, hadFirstTouchGoogleClick) {
-    if (!hasGoogleClickId(function (key) { return params[key]; })) return;
+  // A landing that carries a new Google click rewrites the stored campaign as a whole:
+  // the click's gad_campaignid, or nothing. A reload of the same click leaves it alone,
+  // so it expires with its click. First touch takes it only from the visitor's first
+  // Google click, so ft_gad_campaignid never pairs with another click's ft_gclid.
+  function persistGoogleCampaign(params, newClickIds, hadFirstTouchGoogleClick) {
+    if (!hasGoogleClickId(function (key) { return newClickIds[key]; })) return;
 
     var campaignId = params[GOOGLE_CAMPAIGN_KEY] || '';
     if (campaignId) {
@@ -559,6 +614,7 @@
   // Replaces the stored set wholesale — a campaign link carrying fewer params must not
   // inherit leftover fields from the previous campaign.
   function setLastTouchUtms(utms) {
+    var now = Date.now();
     for (var i = 0; i < UTM_KEYS.length; i++) {
       var key = UTM_KEYS[i];
       if (utms[key]) {
@@ -567,14 +623,29 @@
         safeRemove(sessionStorage, 'lr_' + key);
       }
     }
-    safeSet(localStorage, 'lr_lt', JSON.stringify({ u: utms, t: Date.now() }));
+    // The tab's copy carries its own stamp, so it ages out on the same clock as lr_lt
+    // even when another tab is the one that saw lr_lt expire and removed it.
+    safeSet(sessionStorage, 'lr_lt_t', String(now));
+    safeSet(localStorage, 'lr_lt', JSON.stringify({ u: utms, t: now }));
   }
 
-  function clearLastTouchUtms() {
+  function clearTabUtmCopy() {
     for (var i = 0; i < UTM_KEYS.length; i++) {
       safeRemove(sessionStorage, 'lr_' + UTM_KEYS[i]);
     }
+    safeRemove(sessionStorage, 'lr_lt_t');
+  }
+
+  function clearLastTouchUtms() {
+    clearTabUtmCopy();
     safeRemove(localStorage, 'lr_lt');
+  }
+
+  // A tab copy older than the window. Copies written before the stamp existed have
+  // none and keep the behaviour they had.
+  function isTabUtmCopyExpired() {
+    var t = Number(safeGet(sessionStorage, 'lr_lt_t'));
+    return t > 0 && Date.now() - t > LAST_TOUCH_TTL_MS;
   }
 
   // ============================================================
@@ -585,7 +656,7 @@
     var params = getQueryParams();
     var foundUtms = {};
     var foundClickIds = {};
-    var newClickIdInUrl = false;
+    var newClickIds = {};
     // Read before the click ids below write this landing's own first touch.
     var hadFirstTouchGoogleClick = hasGoogleClickId(getFirstTouchClickId);
 
@@ -602,14 +673,20 @@
     for (var j = 0; j < CLICK_ID_KEYS.length; j++) {
       var cidKey = CLICK_ID_KEYS[j];
       if (params[cidKey]) {
-        if (params[cidKey] !== getClickId(cidKey)) newClickIdInUrl = true;
+        // Only a new value is a new click. A reload or a restored tab of an earlier ad
+        // landing whose click is still stored keeps that click's time, so it cannot
+        // outrank a later click.
+        if (params[cidKey] !== getClickId(cidKey)) {
+          newClickIds[cidKey] = true;
+          setClickId(cidKey, params[cidKey]);
+        }
         foundClickIds[cidKey] = params[cidKey];
-        setClickId(cidKey, params[cidKey]);
         setFirstTouchClickId(cidKey, params[cidKey]);
       }
     }
+    var newClickIdInUrl = Object.keys(newClickIds).length > 0;
 
-    persistGoogleCampaign(params, hadFirstTouchGoogleClick);
+    persistGoogleCampaign(params, newClickIds, hadFirstTouchGoogleClick);
 
     // Meta cookies — fall back to document.cookie if not found in URL params
     if (!foundClickIds.fbp) {
@@ -643,23 +720,31 @@
     // Only an arrival that actually carries campaign params rewrites last-touch state.
     // Navigation with no campaign params — a payment gateway sending the visitor back —
     // leaves the stored set alone, which is what keeps attribution across the redirect.
-    if (Object.keys(foundUtms).length) {
+    if (Object.keys(foundUtms).length && !newClickIdInUrl && isEarlierAdLanding(params)) {
+      // A reload or a restored tab of an earlier ad landing: its UTMs belong to that
+      // click, so they must not relabel the last click's.
+      log('UTM params ignored, this landing is not the last click', foundUtms);
+    } else if (Object.keys(foundUtms).length) {
       setLastTouchUtms(foundUtms);
       log('UTM params found', foundUtms);
     } else if (newClickIdInUrl) {
       // A new click that carries no UTMs is still a new touch: drop the previous
-      // campaign's UTMs rather than crediting them to this click.
-      clearLastTouchUtms();
+      // campaign's UTMs rather than crediting them to this click. An empty record, not
+      // none, so another tab still open on an earlier landing cannot fall back to its
+      // own sessionStorage copy of that landing's UTMs.
+      setLastTouchUtms({});
     }
 
     if (Object.keys(foundClickIds).length) log('Click IDs found', foundClickIds);
   }
 
   // The stamped record wins as a complete set while it is valid; otherwise we fall back
-  // to sessionStorage, which keeps visitors who upgrade mid-session — and visitors whose
-  // localStorage is unavailable — on the pre-existing behaviour.
+  // to sessionStorage. That keeps visitors who upgrade mid-session, and visitors whose
+  // localStorage is unavailable, on the pre-existing behaviour inside the same 24-hour
+  // window: a stamped tab copy expires with it.
   function getPersistedUtms() {
     var record = getLastTouchRecord();
+    if (!record && isTabUtmCopyExpired()) clearTabUtmCopy();
     var utms = {};
     for (var i = 0; i < UTM_KEYS.length; i++) {
       var key = UTM_KEYS[i];
@@ -697,7 +782,8 @@
   // ============================================================
 
   function classifyTrafficSource(clickIds, utms, referringDomain) {
-    // 1. Click ID based (paid traffic)
+    // 1. Click ID based (paid traffic). clickIds holds only the last click's ids
+    // (getLastClickIds), so this order decides only between networks on one landing.
     if (clickIds.gclid || clickIds.gbraid || clickIds.wbraid) return { type: 'paid_search', name: 'google' };
     if (clickIds.fbclid) return { type: 'paid_social', name: 'meta' };
     // After Google and Meta: a landing URL re-shared with its query string must not
@@ -1085,8 +1171,12 @@
   function buildPayload(eventType, eventName, eventData) {
     var utms = getPersistedUtms();
     var clickIds = getPersistedClickIds();
+    var lastClickIds = getLastClickIds();
+    // The Google campaign belongs to the Google click, so it is sent as last touch only
+    // while that click is the last click.
+    if (!hasGoogleClickId(function (key) { return lastClickIds[key]; })) clickIds[GOOGLE_CAMPAIGN_KEY] = '';
     var referringDomain = getReferringDomain(document.referrer);
-    var trafficSource = classifyTrafficSource(clickIds, utms, referringDomain);
+    var trafficSource = classifyTrafficSource(lastClickIds, utms, referringDomain);
     setFirstTouchTrafficSource(trafficSource);
     setLastTouchTrafficSource(trafficSource);
 
