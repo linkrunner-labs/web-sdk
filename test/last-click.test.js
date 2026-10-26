@@ -209,27 +209,29 @@ test('a tab left open past 24 hours does not bring its UTMs back once another ta
   assert.strictEqual(view.utm_campaign, '');
 });
 
-test('reloading the last click\'s landing refreshes its UTMs even when it also carries an older click id', function () {
+test('reloading the last click\'s landing within 24 hours keeps its UTMs, even with an older click id on it', function () {
   var v = visitor();
   var url = 'https://shop.example.com/?utm_source=google&utm_medium=cpc&utm_campaign=brand_search&gclid=Cj0_google_click&fbclid=IwAR_meta_click';
   v.load(META_LANDING).pageView();
   v.clock.advance(HOUR);
   v.load(url).pageView();
-  v.clock.advance(25 * HOUR);
+  v.clock.advance(HOUR);
   var view = v.load(url).pageView();
 
   assert.strictEqual(view.traffic_source_name, 'google');
   assert.strictEqual(view.utm_campaign, 'brand_search');
 });
 
-test('reloading the last click\'s own landing still refreshes its UTMs', function () {
+test('reloading the last click\'s own landing does not restart its 24-hour UTM window', function () {
   var v = visitor();
   v.load(META_LANDING_WITH_UTMS).pageView();
   v.clock.advance(25 * HOUR);
   var view = v.load(META_LANDING_WITH_UTMS).pageView();
 
   assert.strictEqual(view.traffic_source_name, 'meta');
-  assert.strictEqual(view.utm_campaign, 'spring');
+  assert.strictEqual(view.utm_campaign, '');
+  // The campaign is still known, through the Meta click's own params.
+  assert.match(view.meta_click_params, /utm_campaign=spring/);
 });
 
 test('one landing carrying two networks\' ids keeps the fixed order', function () {
@@ -538,4 +540,170 @@ test('a stored fbclid without a usable time still gets a well-formed fbc', funct
   var view = v.load(META_LANDING).pageView();
 
   assert.match(view.fbc, /^fb\.1\.\d+\.IwAR_meta_click$/);
+});
+
+test('the Meta click\'s campaign, ad set and ad travel with it after its UTMs expire', function () {
+  var v = visitor();
+  v.load(GOOGLE_LANDING).pageView();
+  v.clock.advance(DAY);
+  v.load('https://shop.example.com/?utm_source=facebook&utm_medium=paid_social&utm_campaign=diwali&utm_id=120210000000001&utm_term=adset_a&utm_content=ad_a&campaign_id=120210000000001&adset_id=120210000000002&ad_id=120210000000003&fbclid=IwAR_meta_click').pageView();
+  v.clock.advance(2 * DAY);
+  var purchase = v.load(RETURN_URL, GATEWAY_REFERRER).track('purchase', { amount: 1200 });
+
+  assert.strictEqual(purchase.traffic_source_name, 'meta');
+  assert.strictEqual(purchase.utm_campaign, '');
+  assert.strictEqual(purchase.meta_click_params,
+    'utm_id=120210000000001&campaign_id=120210000000001&adset_id=120210000000002&ad_id=120210000000003' +
+    '&utm_source=facebook&utm_medium=paid_social&utm_campaign=diwali&utm_term=adset_a&utm_content=ad_a');
+  assert.strictEqual(purchase.ft_meta_click_params, undefined);
+  var ctx = JSON.parse(v.localStorage.getItem('lr_ctx'));
+  assert.strictEqual(ctx.fields.meta_click_params, purchase.meta_click_params);
+});
+
+test('a new Meta click without params does not inherit the previous Meta click\'s', function () {
+  var v = visitor();
+  v.load(META_LANDING_WITH_UTMS).pageView();
+  v.clock.advance(DAY);
+  var view = v.load('https://shop.example.com/?fbclid=IwAR_second_meta_click').pageView();
+
+  assert.strictEqual(view.meta_click_params, '');
+});
+
+test('the Meta click\'s params are sent only while it is the last click', function () {
+  var v = visitor();
+  v.load(META_LANDING_WITH_UTMS).pageView();
+  v.clock.advance(DAY);
+  var view = v.load(GOOGLE_LANDING).pageView();
+
+  assert.strictEqual(view.traffic_source_name, 'google');
+  assert.strictEqual(view.meta_click_params, '');
+});
+
+test('the Meta click\'s params expire with it, after 90 days', function () {
+  var v = visitor();
+  v.load(META_LANDING_WITH_UTMS).pageView();
+  v.clock.advance(91 * DAY);
+  var view = v.load(PLAIN_PAGE).pageView();
+
+  assert.strictEqual(view.fbclid, '');
+  assert.strictEqual(view.meta_click_params, '');
+  assert.strictEqual(v.localStorage.getItem('lr_meta_click_params'), null);
+});
+
+test('a device clock corrected between two clicks does not decide which is last', function () {
+  var v = visitor();
+  // The Google click is stored while the clock runs a day fast.
+  v.clock.advance(DAY);
+  v.load(GOOGLE_LANDING).pageView();
+  v.clock.advance(-DAY + HOUR);
+  var view = v.load(META_LANDING).pageView();
+
+  assert.strictEqual(view.traffic_source_name, 'meta');
+  assert.strictEqual(view.gad_campaignid, '');
+});
+
+test('a numbered click outranks clicks stored before numbers existed', function () {
+  var v = visitor({ storage: function (now) { return { lr_fbclid: stored('IwAR_legacy_click', now - DAY) }; } });
+  var view = v.load(GOOGLE_LANDING).pageView();
+
+  assert.strictEqual(view.traffic_source_name, 'google');
+});
+
+test('after a rollback, a click the earlier SDK stored later still wins', function () {
+  var v = visitor();
+  v.load(META_LANDING_WITH_UTMS).pageView();
+  v.clock.advance(HOUR);
+  v.load(GOOGLE_LANDING).pageView();
+  // Rolled back for a day: the earlier SDK stores a newer Meta click with no number and
+  // leaves the stored Meta params as they were.
+  v.clock.advance(DAY);
+  v.localStorage.setItem('lr_fbclid', stored('IwAR_rollback_click', v.clock.now));
+  v.clock.advance(HOUR);
+  var view = v.load(PLAIN_PAGE).pageView();
+
+  assert.strictEqual(view.traffic_source_name, 'meta');
+  assert.strictEqual(view.fbclid, 'IwAR_rollback_click');
+  // The stored params belong to the first Meta click, so they are not sent with this one.
+  assert.strictEqual(view.meta_click_params, '');
+});
+
+test('a page left before its page view was due still sends it', function () {
+  var v = visitor();
+  var sdk = loadSdk({ url: META_LANDING, clock: v.clock, localStorage: v.localStorage, sessionStorage: createStorage() });
+  assert.strictEqual(sdk.sent.length, 0);
+  sdk.dispatch('pagehide');
+
+  assert.strictEqual(sdk.sent.length, 1);
+  assert.strictEqual(sdk.sent[0].event_type, 'page_view');
+  // The deferred one that follows is the same page view, not a second.
+  sdk.flush();
+  assert.strictEqual(sdk.sent.length, 1);
+});
+
+test('the Shopify context record says when the last-touch UTMs were recorded', function () {
+  var v = visitor();
+  var clickTime = v.clock.now;
+  v.load(META_LANDING_WITH_UTMS).pageView();
+  v.clock.advance(23 * HOUR);
+  v.load(PLAIN_PAGE).pageView();
+
+  var ctx = JSON.parse(v.localStorage.getItem('lr_ctx'));
+  assert.strictEqual(ctx.t, clickTime + 23 * HOUR);
+  assert.strictEqual(ctx.utm_t, clickTime);
+});
+
+test('a lost click counter does not reuse a number a stored click already has', function () {
+  var v = visitor();
+  v.load(GOOGLE_LANDING).pageView();
+  v.clock.advance(HOUR);
+  v.load(META_LANDING).pageView();
+  v.localStorage.removeItem('lr_click_seq');
+  v.clock.advance(HOUR);
+  var view = v.load(SECOND_GOOGLE_LANDING).pageView();
+
+  assert.strictEqual(view.traffic_source_name, 'google');
+  assert.strictEqual(view.gad_campaignid, '222');
+});
+
+test('a restored tab of an earlier Meta landing keeps the later Meta click\'s params', function () {
+  var v = visitor();
+  v.load('https://shop.example.com/?utm_campaign=first_campaign&fbclid=IwAR_first').pageView();
+  v.clock.advance(DAY);
+  v.load('https://shop.example.com/?utm_campaign=second_campaign&fbclid=IwAR_second').pageView();
+  v.clock.advance(HOUR);
+  var view = v.load('https://shop.example.com/?utm_campaign=first_campaign&fbclid=IwAR_first').pageView();
+
+  assert.strictEqual(view.fbclid, 'IwAR_second');
+  assert.strictEqual(view.meta_click_params, 'utm_campaign=second_campaign');
+});
+
+test('the Meta params keep separators and non-Latin names intact, and drop whole params past the cap', function () {
+  var v = visitor();
+  var name = 'दिवाली घी & मिठाई = ऑफ़र';
+  var long = new Array(300).join('घ');
+  var view = v.load('https://shop.example.com/?utm_id=120210000000001&campaign_id=120210000000002&utm_campaign=' +
+    encodeURIComponent(name) + '&utm_term=' + encodeURIComponent(long) + '&fbclid=IwAR_meta_click').pageView();
+
+  var parsed = new URLSearchParams(view.meta_click_params);
+  assert.strictEqual(parsed.get('utm_id'), '120210000000001');
+  assert.strictEqual(parsed.get('campaign_id'), '120210000000002');
+  assert.strictEqual(parsed.get('utm_campaign'), name);
+  assert.strictEqual(parsed.get('utm_term'), null);
+  assert.ok(view.meta_click_params.length <= 2000);
+});
+
+test('pagehide after the page view went out sends nothing more, even after a hash change', function () {
+  var sdk = loadSdk({ url: META_LANDING, clock: createClock(), localStorage: createStorage(), sessionStorage: createStorage() });
+  sdk.pageView();
+  sdk.sandbox.location.href = META_LANDING + '#reviews';
+  sdk.dispatch('pagehide');
+
+  assert.strictEqual(sdk.sent.length, 1);
+});
+
+test('a page view sent before the load finished reports no load timings', function () {
+  var sdk = loadSdk({ url: META_LANDING, clock: createClock(), localStorage: createStorage(), sessionStorage: createStorage(), navigationType: 'navigate' });
+  sdk.dispatch('pagehide');
+
+  assert.strictEqual(sdk.sent[0].page_load_time, undefined);
 });

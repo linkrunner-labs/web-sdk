@@ -77,6 +77,7 @@ function loadSdk(options) {
   var sent = [];
   var attempts = [];
   var timers = [];
+  var listeners = {};
 
   // options.respond(endpoint) -> { ok, status } | 'network-error'
   // Default: every endpoint answers 200, which is what every test that does not
@@ -170,7 +171,7 @@ function loadSdk(options) {
       return timers.length;
     },
     clearTimeout: function () {},
-    addEventListener: function () {},
+    addEventListener: function (type, fn) { (listeners[type] = listeners[type] || []).push(fn); },
     innerWidth: 390,
     innerHeight: 844,
     devicePixelRatio: 3,
@@ -199,6 +200,8 @@ function loadSdk(options) {
     localStorage: localStorage,
     sessionStorage: sessionStorage,
     flush: flush,
+    // Fires a window event (e.g. 'pagehide') at the listeners the SDK registered.
+    dispatch: function (type) { (listeners[type] || []).forEach(function (fn) { fn({ type: type }); }); },
     // Fires the deferred initial page view and returns its payload.
     pageView: function () {
       flush();
