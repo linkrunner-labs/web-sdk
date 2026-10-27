@@ -707,3 +707,98 @@ test('a page view sent before the load finished reports no load timings', functi
 
   assert.strictEqual(sdk.sent[0].page_load_time, undefined);
 });
+
+// The latest tagged touch wins (LIN-3622): a visit with UTMs and no ad click, such as an
+// email link, is the last touch while its UTMs last, with its own campaign only.
+var NEWSLETTER_LANDING = 'https://shop.example.com/?utm_source=newsletter&utm_medium=email&utm_campaign=oct';
+
+test('a tagged visit with no ad click after a Meta click is the last touch, with its own campaign', function () {
+  var v = visitor();
+  v.load(META_LANDING_WITH_UTMS).pageView();
+  v.clock.advance(2 * DAY);
+  var landing = v.load(NEWSLETTER_LANDING).pageView();
+  v.clock.advance(10 * MINUTE);
+  var purchase = v.load(RETURN_URL, GATEWAY_REFERRER).track('purchase', { amount: 1200 });
+
+  [landing, purchase].forEach(function (event) {
+    assert.strictEqual(event.traffic_source_type, 'email');
+    assert.strictEqual(event.traffic_source_name, 'newsletter');
+    assert.strictEqual(event.utm_campaign, 'oct');
+    // No Meta campaign rides along, and Meta's postback still gets its click.
+    assert.strictEqual(event.meta_click_params, '');
+    assert.strictEqual(event.fbclid, 'IwAR_meta_click');
+    assert.strictEqual(event.ft_traffic_source_name, 'meta');
+    assert.strictEqual(event.ft_utm_campaign, 'spring');
+  });
+});
+
+test('a tagged visit after a Google click sends no Google campaign', function () {
+  var v = visitor();
+  v.load(GOOGLE_LANDING).pageView();
+  v.clock.advance(DAY);
+  var view = v.load(NEWSLETTER_LANDING).pageView();
+
+  assert.strictEqual(view.traffic_source_type, 'email');
+  assert.strictEqual(view.gad_campaignid, '');
+  assert.strictEqual(view.gclid, 'Cj0_google_click');
+  assert.strictEqual(view.ft_gad_campaignid, '111');
+});
+
+test('a day after a tagged visit, the last ad click is the last touch again', function () {
+  var v = visitor();
+  v.load(META_LANDING_WITH_UTMS).pageView();
+  v.clock.advance(2 * DAY);
+  v.load(NEWSLETTER_LANDING).pageView();
+  v.clock.advance(25 * HOUR);
+  var purchase = v.load(PLAIN_PAGE).track('purchase', { amount: 1200 });
+
+  assert.strictEqual(purchase.traffic_source_name, 'meta');
+  assert.strictEqual(purchase.utm_campaign, '');
+  assert.match(purchase.meta_click_params, /utm_campaign=spring/);
+});
+
+test('an ad click after a tagged visit takes last touch back', function () {
+  var v = visitor();
+  v.load(NEWSLETTER_LANDING).pageView();
+  v.clock.advance(HOUR);
+  var view = v.load(META_LANDING).pageView();
+
+  assert.strictEqual(view.traffic_source_name, 'meta');
+  // The newsletter's campaign does not ride along on the Meta click.
+  assert.strictEqual(view.utm_campaign, '');
+});
+
+test('reloading a tagged page is not a new touch', function () {
+  var v = visitor();
+  v.load(META_LANDING_WITH_UTMS).pageView();
+  v.clock.advance(2 * DAY);
+  var view = loadSdk({
+    url: NEWSLETTER_LANDING,
+    clock: v.clock,
+    localStorage: v.localStorage,
+    sessionStorage: createStorage(),
+    navigationType: 'reload',
+  }).pageView();
+
+  assert.strictEqual(view.traffic_source_name, 'meta');
+  assert.strictEqual(view.utm_campaign, '');
+});
+
+test('the site\'s own link to a tagged page is not a new touch', function () {
+  var v = visitor();
+  v.load(META_LANDING_WITH_UTMS).pageView();
+  v.clock.advance(HOUR);
+  var view = v.load('https://shop.example.com/sale?utm_source=site&utm_medium=banner&utm_campaign=promo', PLAIN_PAGE).pageView();
+
+  assert.strictEqual(view.traffic_source_name, 'meta');
+  assert.strictEqual(view.utm_campaign, 'spring');
+});
+
+test('a tagged link with no utm_source does not take last touch from the ad click', function () {
+  var v = visitor();
+  v.load(META_LANDING_WITH_UTMS).pageView();
+  v.clock.advance(2 * DAY);
+  var view = v.load('https://shop.example.com/?utm_campaign=oct').pageView();
+
+  assert.strictEqual(view.traffic_source_name, 'meta');
+});

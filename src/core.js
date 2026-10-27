@@ -733,8 +733,10 @@
   }
 
   // Replaces the stored set wholesale — a campaign link carrying fewer params must not
-  // inherit leftover fields from the previous campaign.
-  function setLastTouchUtms(utms) {
+  // inherit leftover fields from the previous campaign. ownTouch marks a tagged visit with
+  // no ad click (an email or a partner link): it is the last touch while its UTMs last,
+  // ahead of an earlier ad click (LIN-3622).
+  function setLastTouchUtms(utms, ownTouch) {
     var now = Date.now();
     for (var i = 0; i < UTM_KEYS.length; i++) {
       var key = UTM_KEYS[i];
@@ -747,7 +749,9 @@
     // The tab's copy carries its own stamp, so it ages out on the same clock as lr_lt
     // even when another tab is the one that saw lr_lt expire and removed it.
     safeSet(sessionStorage, 'lr_lt_t', String(now));
-    safeSet(localStorage, 'lr_lt', JSON.stringify({ u: utms, t: now }));
+    var record = { u: utms, t: now };
+    if (ownTouch) record.o = 1;
+    safeSet(localStorage, 'lr_lt', JSON.stringify(record));
   }
 
   function clearTabUtmCopy() {
@@ -856,8 +860,14 @@
       // UTMs were recorded with that click, or belong to an earlier one, so they neither
       // relabel the last click nor restart its 24-hour window.
       log('UTM params ignored, this landing is not a new click', foundUtms);
+    } else if (Object.keys(foundUtms).length && !carriesAdClick && isRepeatVisit()) {
+      // The same for a tagged page with no ad click reached by a reload, back/forward or
+      // the site's own link: not a new touch, so it neither takes last touch nor restarts
+      // the window.
+      log('UTM params ignored, this visit is not a new touch', foundUtms);
     } else if (Object.keys(foundUtms).length) {
-      setLastTouchUtms(foundUtms);
+      // A tagged visit with no ad click takes last touch only with a utm_source to name it.
+      setLastTouchUtms(foundUtms, !carriesAdClick && !!foundUtms.utm_source);
       log('UTM params found', foundUtms);
     } else if (newClickIdInUrl) {
       // A new click that carries no UTMs is still a new touch: drop the previous
@@ -1305,7 +1315,11 @@
   function buildPayload(eventType, eventName, eventData) {
     var utms = getPersistedUtms();
     var clickIds = getPersistedClickIds();
-    var lastClickIds = getLastClickIds();
+    // A tagged visit with no ad click after the last ad click is the last touch while its
+    // UTMs last (LIN-3622): its UTMs decide the source, and no network's campaign is sent
+    // with it. Every click id is still sent, for each network's postback.
+    var lastTouch = getLastTouchRecord();
+    var lastClickIds = lastTouch && lastTouch.o ? {} : getLastClickIds();
     // The Google campaign belongs to the Google click, so it is sent as last touch only
     // while that click is the last click.
     if (!hasGoogleClickId(function (key) { return lastClickIds[key]; })) clickIds[GOOGLE_CAMPAIGN_KEY] = '';

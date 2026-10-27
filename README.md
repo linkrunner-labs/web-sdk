@@ -8,7 +8,7 @@ Web attribution SDK for [Linkrunner](https://linkrunner.io) — track page views
 - First-touch and last-touch UTM attribution
 - Last-touch UTMs survive payment gateway redirects and tab loss for 24 hours
 - Click ID persistence (gclid, fbclid, ttclid, etc.) with 90-day TTL
-- The last ad click decides the traffic source, whichever network it came from
+- The latest tagged touch decides the traffic source: the last ad click, whichever network it came from, or a later tagged visit (an email link) for its 24 hours
 - Traffic source classification (paid, organic, social, AI search, referral, direct)
 - AI search engine detection (ChatGPT, Perplexity, Claude, Gemini, and more)
 - Bot detection
@@ -695,6 +695,13 @@ referrer). When one URL carries new click IDs from two networks, a fixed order
 decides: Google, then Meta, then the rest. A call queued before the script loads is
 attributed to the landing it was made on, and a page left before its page view was due
 sends it on `pagehide`.
+
+A tagged visit with no click ID, such as an email or partner link with a `utm_source`,
+is the last touch after an earlier ad click while its UTMs last: its UTMs decide the
+source, and no network's campaign (`gad_campaignid`, `meta_click_params`) is sent with
+it. The ad click IDs are still sent for the postbacks, and once the visit's 24 hours are
+over the last ad click is the last touch again for the rest of its 90 days. A reload,
+back/forward, or the site's own link to a tagged page is not a new touch.
 
 ## License
 
