@@ -65,6 +65,40 @@ test('a lowercase sccid param is captured too', function () {
   assert.strictEqual(landing.sccid, 'sc_lower_1');
 });
 
+test('any casing of the param is captured, not just the four that were listed', function () {
+  // The alias list used to enumerate spellings, which covered four of the thirty-two
+  // ways "sccid" can be cased and missed Sccid and SCCid, no less likely than SCCID.
+  ['ScCid', 'sccid', 'SCCID', 'Sccid', 'SCCid', 'scCid', 'ScCID'].forEach(function (name) {
+    var landing = visitor()
+      .load('https://shop.example/offers?' + name + '=sc_case_1')
+      .pageView();
+
+    assert.strictEqual(landing.sccid, 'sc_case_1', name + ' should be captured');
+  });
+});
+
+test('a Snapchat click is paid traffic, like every other click id', function () {
+  // A Snap click usually arrives from the in-app webview with no referrer. Without a
+  // rung in classifyTrafficSource it read as direct/direct, so a paid visit was
+  // invisible as paid, and nothing server side could fix it: the declared-paid-social
+  // reclassifier needs type "social" AND utm_medium=paid_social, and no reclassifier
+  // reads a click id.
+  var landing = visitor().load('https://shop.example/offers?ScCid=sc_paid_1').pageView();
+
+  assert.strictEqual(landing.traffic_source_type, 'paid_social');
+  assert.strictEqual(landing.traffic_source_name, 'snapchat');
+});
+
+test('a click id already on the URL still wins over the Snapchat one', function () {
+  // The rung is last, so adding it cannot change how a URL carrying two click ids
+  // already resolved.
+  var landing = visitor()
+    .load('https://shop.example/offers?ScCid=sc_1&ttclid=tt_1')
+    .pageView();
+
+  assert.strictEqual(landing.traffic_source_name, 'tiktok');
+});
+
 test('a landing page with no Snapchat click id sends an empty sccid', function () {
   // Every other click id behaves this way: the column exists on every row, so an
   // absent id must be '' rather than undefined, or the collector writes nothing.

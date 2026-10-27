@@ -274,17 +274,32 @@
   // forms are accepted too, for a link built by hand or passed through a tool that
   // normalised the case. Order is preference order.
   var CLICK_ID_URL_ALIASES = {
-    sccid: ['ScCid', 'sccid', 'SCCID', 'sc_cid']
+    sccid: ['ScCid', 'sc_cid']
   };
 
-  // The landing URL's value for a click id, honouring the aliases above.
+  // The landing URL's value for a click id, honouring the aliases above. The alias
+  // match is case INSENSITIVE on the parameter name: the point of the list is a link
+  // built by hand or passed through a tool that normalised the case, and enumerating
+  // spellings covered four of the thirty-two ways "sccid" can be cased, missing
+  // Sccid and SCCid, which are no less likely than the ones listed. Exact-key for
+  // everything else, so nothing else widens.
   function clickIdFromParams(params, key) {
     var aliases = CLICK_ID_URL_ALIASES[key];
     if (!aliases) return params[key];
-    for (var i = 0; i < aliases.length; i++) {
-      if (params[aliases[i]]) return params[aliases[i]];
+    var wanted = {};
+    for (var i = 0; i < aliases.length; i++) wanted[aliases[i].toLowerCase()] = i;
+    var best = -1;
+    var value = '';
+    for (var name in params) {
+      if (!Object.prototype.hasOwnProperty.call(params, name)) continue;
+      var rank = wanted[name.toLowerCase()];
+      if (rank === undefined || !params[name]) continue;
+      if (best === -1 || rank < best) {
+        best = rank;
+        value = params[name];
+      }
     }
-    return '';
+    return value;
   }
 
   // Google auto-tagging puts the campaign id (gad_campaignid) on the landing URL only,
@@ -734,6 +749,11 @@
     if (clickIds.li_fat_id) return { type: 'paid_social', name: 'linkedin' };
     if (clickIds.dclid) return { type: 'paid_display', name: 'google' };
     if (clickIds.irclickid) return { type: 'paid_affiliate', name: 'impact' };
+    // Last of the click-id rungs, so adding it cannot change how a URL carrying two
+    // click ids already resolved. A Snap click usually arrives from the in-app
+    // webview with no referrer, so without this it reads as direct/direct, and with a
+    // referrer as organic social: either way the paid visit is invisible as paid.
+    if (clickIds.sccid) return { type: 'paid_social', name: 'snapchat' };
 
     // 2. UTM medium based
     if (utms.utm_medium) {
