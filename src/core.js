@@ -758,6 +758,9 @@
     // webview with no referrer, so without this it reads as direct/direct, and with a
     // referrer as organic social: either way the paid visit is invisible as paid.
     if (clickIds.sccid) return { type: 'paid_social', name: 'snapchat' };
+    // Same reasoning as Snapchat's rung above, and also last: without it a Reddit
+    // click read as direct, or as organic social when the referrer survived.
+    if (clickIds.rdt_cid) return { type: 'paid_social', name: 'reddit' };
 
     // 2. UTM medium based
     if (utms.utm_medium) {

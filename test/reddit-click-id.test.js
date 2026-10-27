@@ -61,6 +61,28 @@ test('the Reddit click id reaches a purchase on the gateway return page', functi
   assert.strictEqual(purchase.ft_rdt_cid, 'rdt_click_abc123');
 });
 
+test('a Reddit click is paid traffic, like every other click id', function () {
+  // Without a rung in classifyTrafficSource a Reddit click read as direct/direct, or
+  // as organic social when the referrer survived, so the paid visit was invisible as
+  // paid. Nothing server side could promote it: the declared-paid-social reclassifier
+  // needs type "social" AND utm_medium=paid_social, and no reclassifier reads a
+  // click id.
+  var landing = visitor().load('https://shop.example/offers?rdt_cid=rdt_paid_1').pageView();
+
+  assert.strictEqual(landing.traffic_source_type, 'paid_social');
+  assert.strictEqual(landing.traffic_source_name, 'reddit');
+});
+
+test('a click id already on the URL still wins over the Reddit one', function () {
+  // The rung is last, so adding it cannot change how a URL carrying two click ids
+  // already resolved.
+  var landing = visitor()
+    .load('https://shop.example/offers?rdt_cid=rdt_1&ttclid=tt_1')
+    .pageView();
+
+  assert.strictEqual(landing.traffic_source_name, 'tiktok');
+});
+
 test('a landing page with no Reddit click id sends an empty rdt_cid', function () {
   // The column exists on every row, so an absent id must be '' rather than
   // undefined, or the collector writes nothing for it.
