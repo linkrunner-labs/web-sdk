@@ -272,8 +272,41 @@
   var GOOGLE_CLICK_ID_KEYS = ['gclid', 'gbraid', 'wbraid'];
   var GOOGLE_CAMPAIGN_KEY = 'gad_campaignid';
 
-  // Everything persisted and sent per click: the click ids plus the Google campaign.
-  var PERSISTED_CLICK_KEYS = CLICK_ID_KEYS.concat([GOOGLE_CAMPAIGN_KEY]);
+  // The Meta click's own campaign, ad set and ad, stored with the fbclid for the same
+  // reason as gad_campaignid: last-touch UTMs last 24 hours, the click 90 days. A query
+  // string of the landing's params below, replaced by every new Meta click (LIN-3622).
+  var META_CLICK_PARAMS_KEY = 'meta_click_params';
+  // Ids first: the collector cuts a field at 2048 characters, and long encoded names must
+  // not push them out. Whole params only, up to META_CLICK_PARAMS_MAX.
+  var META_CLICK_PARAM_NAMES = ['utm_id', 'campaign_id', 'adset_id', 'ad_set_id', 'ad_id',
+    'utm_source', 'utm_medium', 'utm_campaign', 'utm_term', 'utm_content'];
+  var META_CLICK_PARAMS_MAX = 2000;
+
+  // Everything persisted and sent per click: the click ids plus the networks' campaigns.
+  var PERSISTED_CLICK_KEYS = CLICK_ID_KEYS.concat([GOOGLE_CAMPAIGN_KEY, META_CLICK_PARAMS_KEY]);
+  // First touch has ft_utm_* for the Meta campaign, so it takes no Meta params of its own.
+  var FIRST_TOUCH_CLICK_KEYS = CLICK_ID_KEYS.concat([GOOGLE_CAMPAIGN_KEY]);
+
+  // The click ids ranked by when they were clicked, to find the last click. fbc and fbp
+  // are left out: they are copied from the Meta pixel's cookies on every page view, so
+  // their stamps say when the visitor was last seen, not when they clicked. The Meta
+  // click itself is fbclid, which is ranked.
+  var LAST_CLICK_KEYS = CLICK_ID_KEYS.filter(function (key) { return key !== 'fbc' && key !== 'fbp'; });
+
+  // Every landing that brings a new click gets the next number of a per-visitor sequence,
+  // stored with its ids, so the order of clicks never depends on the device clock. Ids an
+  // earlier SDK version stored have no number and are ordered by their stamps; those from
+  // one landing were written a few milliseconds apart, so ids stamped this close to the
+  // newest one count as part of it.
+  var SAME_CLICK_MS = 1000;
+
+  // Google's aggregated ids are shared by many clicks, like a campaign id ("non-unique",
+  // in Google's words), so a repeated value can be a new click.
+  var AGGREGATED_CLICK_KEYS = { gbraid: true, wbraid: true };
+
+  // Earlier values remembered per click id, to recognise a reload or a restored tab of an
+  // earlier landing after a newer click from the same network replaced it.
+  var EARLIER_CLICKS_PER_KEY = 10;
 
   var AI_SEARCH_DOMAINS = {
     'chatgpt.com': 'chatgpt', 'chat.openai.com': 'chatgpt',
@@ -450,21 +483,143 @@
   // CLICK ID PERSISTENCE (localStorage, 90-day TTL)
   // ============================================================
 
-  function setClickId(key, value) {
-    safeSet(localStorage, 'lr_' + key, JSON.stringify({ v: value, t: Date.now() }));
+  function setClickId(key, value, seq) {
+    var record = { v: value, t: Date.now() };
+    if (typeof seq === 'number') record.s = seq;
+    safeSet(localStorage, 'lr_' + key, JSON.stringify(record));
   }
 
-  function getClickId(key) {
+  // The next landing's number: one past both the counter and every stored click, so a lost
+  // counter cannot hand out a number an existing click already has.
+  function nextClickSequence() {
+    var seq = Number(safeGet(localStorage, 'lr_click_seq')) || 0;
+    for (var i = 0; i < LAST_CLICK_KEYS.length; i++) {
+      var record = getClickRecord(LAST_CLICK_KEYS[i]);
+      if (record && typeof record.s === 'number' && record.s > seq) seq = record.s;
+    }
+    safeSet(localStorage, 'lr_click_seq', String(seq + 1));
+    return seq + 1;
+  }
+
+  // The stored click as { v, t, s? }, or null when there is none or it is past the TTL. t
+  // is when the click arrived (for fbc/fbp, copied from cookies on every page view, the
+  // last visit) and s its landing's number in the click sequence.
+  function getClickRecord(key) {
     try {
       var raw = safeGet(localStorage, 'lr_' + key);
-      if (!raw) return '';
+      if (!raw) return null;
       var parsed = JSON.parse(raw);
       if (Date.now() - parsed.t > CLICK_ID_TTL_MS) {
         safeRemove(localStorage, 'lr_' + key);
-        return '';
+        return null;
       }
-      return parsed.v || '';
-    } catch (e) { logError('Failed to parse click ID ' + key, e); return ''; }
+      return parsed.v ? parsed : null;
+    } catch (e) { logError('Failed to parse click ID ' + key, e); return null; }
+  }
+
+  function getClickId(key) {
+    var record = getClickRecord(key);
+    return record ? record.v : '';
+  }
+
+  // Click ids a newer click replaced, as { key: [[value, clickTime], ...] }.
+  function getEarlierClickIds() {
+    try {
+      var earlier = JSON.parse(safeGet(localStorage, 'lr_seen') || '{}');
+      return earlier && typeof earlier === 'object' && !Array.isArray(earlier) ? earlier : {};
+    } catch (e) { logError('Failed to parse earlier click IDs', e); return {}; }
+  }
+
+  function getEarlierEntries(earlier, key) {
+    return Array.isArray(earlier[key]) ? earlier[key] : [];
+  }
+
+  // Keeps a replaced click for the rest of its 90 days.
+  function rememberEarlierClickId(key, record) {
+    var earlier = getEarlierClickIds();
+    var now = Date.now();
+    var kept = getEarlierEntries(earlier, key).filter(function (entry) {
+      return entry && entry[0] !== record.v && now - entry[1] <= CLICK_ID_TTL_MS;
+    });
+    kept.push([record.v, record.t]);
+    earlier[key] = kept.slice(-EARLIER_CLICKS_PER_KEY);
+    safeSet(localStorage, 'lr_seen', JSON.stringify(earlier));
+  }
+
+  function isEarlierClickId(key, value) {
+    var entries = getEarlierEntries(getEarlierClickIds(), key);
+    for (var i = 0; i < entries.length; i++) {
+      if (entries[i] && entries[i][0] === value && Date.now() - entries[i][1] <= CLICK_ID_TTL_MS) return true;
+    }
+    return false;
+  }
+
+  // Was this page reloaded, reached by back/forward, or opened from the site's own page?
+  // Safari before 15 has no navigation entry, so the older performance.navigation is the
+  // fallback (1 = reload, 2 = back/forward).
+  function isRepeatVisit() {
+    try {
+      if (getReferringDomain(document.referrer) === location.hostname) return true;
+      var entries = performance.getEntriesByType ? performance.getEntriesByType('navigation') : [];
+      if (entries && entries.length) return entries[0].type === 'reload' || entries[0].type === 'back_forward';
+      var legacy = performance.navigation && performance.navigation.type;
+      return legacy === 1 || legacy === 2;
+    } catch (e) { return false; }
+  }
+
+  // A gbraid arrives from Google's own apps and pages, which send no referrer or a Google one.
+  function isFromGoogleOrApp() {
+    var host = getReferringDomain(document.referrer);
+    return !host || /(^|\.)(google\.[a-z.]+|youtube\.com)$/.test(host);
+  }
+
+  // Is the URL's click id a new click? A click id the visitor already has, stored or
+  // replaced by a newer click, is a reload or a restored tab of that earlier landing: it
+  // keeps its click's time, so it cannot outrank a later click. An aggregated id can
+  // repeat on a genuinely new click. Next to a gclid it belongs to that click, which is
+  // unique; on its own, a known one is the same click on a repeat visit, and a known
+  // gbraid under any referrer but Google's (a payment gateway returning to the landing).
+  function isNewClick(key, value, current, params, newClickIds) {
+    var known = (current && current.v === value) || isEarlierClickId(key, value);
+    if (!AGGREGATED_CLICK_KEYS[key]) return !known;
+    if (params.gclid) return !!newClickIds.gclid;
+    if (!known) return true;
+    if (isRepeatVisit()) return false;
+    return key !== 'gbraid' || isFromGoogleOrApp();
+  }
+
+  // The click ids of the visitor's last ad click, whichever network it came from
+  // (LIN-3622). Every network's click id stays stored and is still sent, because each
+  // network's postback needs its own; only the traffic source and the networks' campaigns
+  // (gad_campaignid, meta_click_params) follow the last click. When one landing carried
+  // two networks' ids,
+  // classifyTrafficSource's order decides between them, as it always has.
+  function getLastClickIds() {
+    var records = {};
+    var newestSeq = -Infinity;
+    var newestSeqT = -Infinity;
+    var newest = -Infinity;
+    var newestUnnumbered = -Infinity;
+    for (var i = 0; i < LAST_CLICK_KEYS.length; i++) {
+      var record = getClickRecord(LAST_CLICK_KEYS[i]);
+      if (!record) continue;
+      // A click with no usable time still counts, as the oldest one.
+      var t = typeof record.t === 'number' && isFinite(record.t) ? record.t : 0;
+      var seq = typeof record.s === 'number' ? record.s : null;
+      records[LAST_CLICK_KEYS[i]] = { v: record.v, t: t, s: seq };
+      if (seq !== null && seq > newestSeq) { newestSeq = seq; newestSeqT = t; }
+      if (seq === null && t > newestUnnumbered) newestUnnumbered = t;
+      if (t > newest) newest = t;
+    }
+    // A numbered click is newer than every click stored before numbers existed, unless an
+    // earlier SDK version stored one after it (a rollback): then the stamps decide.
+    var bySeq = newestSeq > -Infinity && !(newestUnnumbered > newestSeqT + SAME_CLICK_MS);
+    var ids = {};
+    for (var key in records) {
+      var isLast = bySeq ? records[key].s === newestSeq : records[key].t >= newest - SAME_CLICK_MS;
+      if (isLast) ids[key] = records[key].v;
+    }
+    return ids;
   }
 
   function setFirstTouchClickId(key, value) {
@@ -492,11 +647,12 @@
     return false;
   }
 
-  // A landing that carries a Google click rewrites the stored campaign as a whole: the
-  // click's gad_campaignid, or nothing. First touch takes it only from the visitor's
-  // first Google click, so ft_gad_campaignid never pairs with another click's ft_gclid.
-  function persistGoogleCampaign(params, hadFirstTouchGoogleClick) {
-    if (!hasGoogleClickId(function (key) { return params[key]; })) return;
+  // A landing that carries a new Google click rewrites the stored campaign as a whole:
+  // the click's gad_campaignid, or nothing. A reload of the same click leaves it alone,
+  // so it expires with its click. First touch takes it only from the visitor's first
+  // Google click, so ft_gad_campaignid never pairs with another click's ft_gclid.
+  function persistGoogleCampaign(params, newClickIds, hadFirstTouchGoogleClick) {
+    if (!hasGoogleClickId(function (key) { return newClickIds[key]; })) return;
 
     var campaignId = params[GOOGLE_CAMPAIGN_KEY] || '';
     if (campaignId) {
@@ -504,6 +660,26 @@
       if (!hadFirstTouchGoogleClick) setFirstTouchClickId(GOOGLE_CAMPAIGN_KEY, campaignId);
     } else {
       safeRemove(localStorage, 'lr_' + GOOGLE_CAMPAIGN_KEY);
+    }
+  }
+
+  // A landing that carries a new Meta click rewrites the stored Meta params as a whole:
+  // that click's, or nothing, so a later Meta click never inherits an earlier one's. The
+  // record names its fbclid, so it is only ever sent with that click.
+  function persistMetaClickParams(params, newClickIds) {
+    if (!newClickIds.fbclid) return;
+    var query = '';
+    for (var i = 0; i < META_CLICK_PARAM_NAMES.length; i++) {
+      var name = META_CLICK_PARAM_NAMES[i];
+      if (!params[name]) continue;
+      var part = encodeURIComponent(name) + '=' + encodeURIComponent(params[name]);
+      if (query.length + part.length + 1 > META_CLICK_PARAMS_MAX) continue;
+      query += (query ? '&' : '') + part;
+    }
+    if (query) {
+      safeSet(localStorage, 'lr_' + META_CLICK_PARAMS_KEY, JSON.stringify({ v: query, t: Date.now(), fbclid: params.fbclid }));
+    } else {
+      safeRemove(localStorage, 'lr_' + META_CLICK_PARAMS_KEY);
     }
   }
 
@@ -557,8 +733,11 @@
   }
 
   // Replaces the stored set wholesale — a campaign link carrying fewer params must not
-  // inherit leftover fields from the previous campaign.
-  function setLastTouchUtms(utms) {
+  // inherit leftover fields from the previous campaign. ownTouch marks a tagged visit with
+  // no ad click (an email or a partner link): it is the last touch while its UTMs last,
+  // ahead of an earlier ad click (LIN-3622).
+  function setLastTouchUtms(utms, ownTouch) {
+    var now = Date.now();
     for (var i = 0; i < UTM_KEYS.length; i++) {
       var key = UTM_KEYS[i];
       if (utms[key]) {
@@ -567,14 +746,31 @@
         safeRemove(sessionStorage, 'lr_' + key);
       }
     }
-    safeSet(localStorage, 'lr_lt', JSON.stringify({ u: utms, t: Date.now() }));
+    // The tab's copy carries its own stamp, so it ages out on the same clock as lr_lt
+    // even when another tab is the one that saw lr_lt expire and removed it.
+    safeSet(sessionStorage, 'lr_lt_t', String(now));
+    var record = { u: utms, t: now };
+    if (ownTouch) record.o = 1;
+    safeSet(localStorage, 'lr_lt', JSON.stringify(record));
   }
 
-  function clearLastTouchUtms() {
+  function clearTabUtmCopy() {
     for (var i = 0; i < UTM_KEYS.length; i++) {
       safeRemove(sessionStorage, 'lr_' + UTM_KEYS[i]);
     }
+    safeRemove(sessionStorage, 'lr_lt_t');
+  }
+
+  function clearLastTouchUtms() {
+    clearTabUtmCopy();
     safeRemove(localStorage, 'lr_lt');
+  }
+
+  // A tab copy older than the window. Copies written before the stamp existed have
+  // none and keep the behaviour they had.
+  function isTabUtmCopyExpired() {
+    var t = Number(safeGet(sessionStorage, 'lr_lt_t'));
+    return t > 0 && Date.now() - t > LAST_TOUCH_TTL_MS;
   }
 
   // ============================================================
@@ -585,7 +781,8 @@
     var params = getQueryParams();
     var foundUtms = {};
     var foundClickIds = {};
-    var newClickIdInUrl = false;
+    var newClickIds = {};
+    var landingSeq = null;
     // Read before the click ids below write this landing's own first touch.
     var hadFirstTouchGoogleClick = hasGoogleClickId(getFirstTouchClickId);
 
@@ -602,14 +799,24 @@
     for (var j = 0; j < CLICK_ID_KEYS.length; j++) {
       var cidKey = CLICK_ID_KEYS[j];
       if (params[cidKey]) {
-        if (params[cidKey] !== getClickId(cidKey)) newClickIdInUrl = true;
+        var current = getClickRecord(cidKey);
+        if (isNewClick(cidKey, params[cidKey], current, params, newClickIds)) {
+          if (current && current.v !== params[cidKey]) rememberEarlierClickId(cidKey, current);
+          var ranked = LAST_CLICK_KEYS.indexOf(cidKey) >= 0;
+          if (ranked && landingSeq === null) landingSeq = nextClickSequence();
+          newClickIds[cidKey] = true;
+          setClickId(cidKey, params[cidKey], ranked ? landingSeq : undefined);
+        }
         foundClickIds[cidKey] = params[cidKey];
-        setClickId(cidKey, params[cidKey]);
         setFirstTouchClickId(cidKey, params[cidKey]);
       }
     }
+    // fbc/fbp in a URL (a cross-domain hop passing the pixel's ids on) are not an ad click.
+    var newClickIdInUrl = LAST_CLICK_KEYS.some(function (key) { return newClickIds[key]; });
+    var carriesAdClick = LAST_CLICK_KEYS.some(function (key) { return params[key]; });
 
-    persistGoogleCampaign(params, hadFirstTouchGoogleClick);
+    persistGoogleCampaign(params, newClickIds, hadFirstTouchGoogleClick);
+    persistMetaClickParams(params, newClickIds);
 
     // Meta cookies — fall back to document.cookie if not found in URL params
     if (!foundClickIds.fbp) {
@@ -618,6 +825,22 @@
         foundClickIds.fbp = fbpCookie;
         setClickId('fbp', fbpCookie);
         setFirstTouchClickId('fbp', fbpCookie);
+      }
+    }
+
+    // fbc is the Meta click in Meta's format, fb.1.<click time>.<fbclid>. Written for a new
+    // fbclid before the cookie fallback below, so the landing event does not pair the new
+    // fbclid with an older click's _fbc, and never on a reload, which would re-date it.
+    if (params.fbclid && !foundClickIds.fbc) {
+      var fbclidRecord = getClickRecord('fbclid');
+      var isStoredClick = !!fbclidRecord && fbclidRecord.v === params.fbclid;
+      if (newClickIds.fbclid || (isStoredClick && !getCookie('_fbc'))) {
+        var clickTime = isStoredClick && typeof fbclidRecord.t === 'number' ? fbclidRecord.t : Date.now();
+        var fbcValue = 'fb.1.' + clickTime + '.' + params.fbclid;
+        setCookie('_fbc', fbcValue, 90);
+        foundClickIds.fbc = fbcValue;
+        setClickId('fbc', fbcValue);
+        setFirstTouchClickId('fbc', fbcValue);
       }
     }
     if (!foundClickIds.fbc) {
@@ -629,37 +852,41 @@
       }
     }
 
-    // Write _fbc cookie from fbclid in Meta's standard format
-    if (params.fbclid) {
-      var fbcValue = 'fb.1.' + Date.now() + '.' + params.fbclid;
-      setCookie('_fbc', fbcValue, 90);
-      if (!foundClickIds.fbc) {
-        foundClickIds.fbc = fbcValue;
-        setClickId('fbc', fbcValue);
-        setFirstTouchClickId('fbc', fbcValue);
-      }
-    }
-
     // Only an arrival that actually carries campaign params rewrites last-touch state.
     // Navigation with no campaign params — a payment gateway sending the visitor back —
     // leaves the stored set alone, which is what keeps attribution across the redirect.
-    if (Object.keys(foundUtms).length) {
-      setLastTouchUtms(foundUtms);
+    if (Object.keys(foundUtms).length && carriesAdClick && !newClickIdInUrl) {
+      // A reload or a restored tab of an ad landing whose click is already stored: its
+      // UTMs were recorded with that click, or belong to an earlier one, so they neither
+      // relabel the last click nor restart its 24-hour window.
+      log('UTM params ignored, this landing is not a new click', foundUtms);
+    } else if (Object.keys(foundUtms).length && !carriesAdClick && isRepeatVisit()) {
+      // The same for a tagged page with no ad click reached by a reload, back/forward or
+      // the site's own link: not a new touch, so it neither takes last touch nor restarts
+      // the window.
+      log('UTM params ignored, this visit is not a new touch', foundUtms);
+    } else if (Object.keys(foundUtms).length) {
+      // A tagged visit with no ad click takes last touch only with a utm_source to name it.
+      setLastTouchUtms(foundUtms, !carriesAdClick && !!foundUtms.utm_source);
       log('UTM params found', foundUtms);
     } else if (newClickIdInUrl) {
       // A new click that carries no UTMs is still a new touch: drop the previous
-      // campaign's UTMs rather than crediting them to this click.
-      clearLastTouchUtms();
+      // campaign's UTMs rather than crediting them to this click. An empty record, not
+      // none, so another tab still open on an earlier landing cannot fall back to its
+      // own sessionStorage copy of that landing's UTMs.
+      setLastTouchUtms({});
     }
 
     if (Object.keys(foundClickIds).length) log('Click IDs found', foundClickIds);
   }
 
   // The stamped record wins as a complete set while it is valid; otherwise we fall back
-  // to sessionStorage, which keeps visitors who upgrade mid-session — and visitors whose
-  // localStorage is unavailable — on the pre-existing behaviour.
+  // to sessionStorage. That keeps visitors who upgrade mid-session, and visitors whose
+  // localStorage is unavailable, on the pre-existing behaviour inside the same 24-hour
+  // window: a stamped tab copy expires with it.
   function getPersistedUtms() {
     var record = getLastTouchRecord();
+    if (!record && isTabUtmCopyExpired()) clearTabUtmCopy();
     var utms = {};
     for (var i = 0; i < UTM_KEYS.length; i++) {
       var key = UTM_KEYS[i];
@@ -686,8 +913,8 @@
 
   function getFirstTouchClickIds() {
     var ids = {};
-    for (var i = 0; i < PERSISTED_CLICK_KEYS.length; i++) {
-      ids['ft_' + PERSISTED_CLICK_KEYS[i]] = getFirstTouchClickId(PERSISTED_CLICK_KEYS[i]);
+    for (var i = 0; i < FIRST_TOUCH_CLICK_KEYS.length; i++) {
+      ids['ft_' + FIRST_TOUCH_CLICK_KEYS[i]] = getFirstTouchClickId(FIRST_TOUCH_CLICK_KEYS[i]);
     }
     return ids;
   }
@@ -697,7 +924,8 @@
   // ============================================================
 
   function classifyTrafficSource(clickIds, utms, referringDomain) {
-    // 1. Click ID based (paid traffic)
+    // 1. Click ID based (paid traffic). clickIds holds only the last click's ids
+    // (getLastClickIds), so this order decides only between networks on one landing.
     if (clickIds.gclid || clickIds.gbraid || clickIds.wbraid) return { type: 'paid_search', name: 'google' };
     if (clickIds.fbclid) return { type: 'paid_social', name: 'meta' };
     // After Google and Meta: a landing URL re-shared with its query string must not
@@ -807,6 +1035,8 @@
       var entries = performance.getEntriesByType('navigation');
       if (!entries || !entries.length) return {};
       var nav = entries[0];
+      // A page view sent before load (on pagehide) has no load timings to report.
+      if (!nav.loadEventEnd) return {};
       return {
         page_load_time: Math.max(0, nav.loadEventEnd - nav.startTime),
         dom_content_loaded: Math.max(0, nav.domContentLoadedEventEnd - nav.startTime),
@@ -1085,8 +1315,19 @@
   function buildPayload(eventType, eventName, eventData) {
     var utms = getPersistedUtms();
     var clickIds = getPersistedClickIds();
+    // A tagged visit with no ad click after the last ad click is the last touch while its
+    // UTMs last (LIN-3622): its UTMs decide the source, and no network's campaign is sent
+    // with it. Every click id is still sent, for each network's postback.
+    var lastTouch = getLastTouchRecord();
+    var lastClickIds = lastTouch && lastTouch.o ? {} : getLastClickIds();
+    // The Google campaign belongs to the Google click, so it is sent as last touch only
+    // while that click is the last click.
+    if (!hasGoogleClickId(function (key) { return lastClickIds[key]; })) clickIds[GOOGLE_CAMPAIGN_KEY] = '';
+    // The same for the Meta click's params, which must also be that click's own.
+    var metaParams = getClickRecord(META_CLICK_PARAMS_KEY);
+    if (!lastClickIds.fbclid || !metaParams || metaParams.fbclid !== lastClickIds.fbclid) clickIds[META_CLICK_PARAMS_KEY] = '';
     var referringDomain = getReferringDomain(document.referrer);
-    var trafficSource = classifyTrafficSource(clickIds, utms, referringDomain);
+    var trafficSource = classifyTrafficSource(lastClickIds, utms, referringDomain);
     setFirstTouchTrafficSource(trafficSource);
     setLastTouchTrafficSource(trafficSource);
 
@@ -1208,7 +1449,8 @@
   //
   // Refreshed on every event, so a shopper who reaches checkout from the cart page
   // hands the pixel state that is seconds old. The pixel ages out last-touch UTMs
-  // itself from `t`, for the shopper who lands on checkout straight from an email.
+  // itself from `utm_t` (when they were recorded; `t` before 0.1.19), for the shopper
+  // who lands on checkout straight from an email.
   var CONTEXT_ENDPOINT = (function() {
     try { return new URL(COLLECT_ENDPOINT, location.href).href; } catch (e) { return COLLECT_ENDPOINT; }
   })();
@@ -1227,7 +1469,10 @@
       var keys = Object.keys(groups[g]);
       for (var m = 0; m < keys.length; m++) fields[keys[m]] = groups[g][keys[m]];
     }
-    safeSet(localStorage, 'lr_ctx', JSON.stringify({ v: 1, t: Date.now(), endpoint: CONTEXT_ENDPOINT, fields: fields }));
+    // utm_t: when the last-touch UTMs were recorded, so the pixel can age them from the
+    // campaign click rather than from the last storefront event (0 when there are none).
+    var lastTouch = getLastTouchRecord();
+    safeSet(localStorage, 'lr_ctx', JSON.stringify({ v: 1, t: Date.now(), utm_t: lastTouch ? lastTouch.t : 0, endpoint: CONTEXT_ENDPOINT, fields: fields }));
   }
 
   // ============================================================
@@ -1309,7 +1554,13 @@
     var payload = buildPayload('identify', 'identify', null);
     send(payload);
   };
-  window.lr._version = '0.1.18';
+  window.lr._version = '0.1.19';
+
+  // The landing's click ids and UTMs before any queued call is replayed: a call queued
+  // before the script loaded was most likely made on this landing, so it belongs to its
+  // click, not to the visitor's previous one.
+  expireOldClickIds();
+  persistParams();
 
   // Replay queued events
   if (existingQueue.length) log('Replaying ' + existingQueue.length + ' queued event(s)');
@@ -1335,13 +1586,15 @@
 
   log('Initialized', { token: TOKEN.slice(0, 8) + '...', endpoint: COLLECT_ENDPOINT, spa: SPA_ENABLED });
 
-  expireOldClickIds();
-  persistParams();
-
   // After new visitor flag is read, clear it for subsequent events
   visitor.isNew = false;
 
-  // Collect page view after load (for performance metrics accuracy)
+  // Collect page view after load (for performance metrics accuracy). A page left before
+  // that (an instant redirect, an interstitial) sends it on pagehide instead; with payload
+  // encryption on, the asynchronous seal may not finish before the page goes.
+  window.addEventListener('pagehide', function() {
+    if (!lastPageUrl) collectPageView();
+  });
   if (document.readyState === 'complete') {
     setTimeout(collectPageView, 0);
   } else {

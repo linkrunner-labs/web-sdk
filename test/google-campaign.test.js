@@ -95,15 +95,18 @@ test('a campaign id with no Google click is not persisted', function () {
   assert.strictEqual(view.ft_gad_campaignid, '');
 });
 
-test('a non-Google click keeps the stored Google campaign with its gclid', function () {
+test('a later non-Google click keeps the gclid but not its campaign as last touch', function () {
   var v = visitor();
   v.load(BOF_LANDING).pageView();
   v.clock.advance(MINUTE);
   var view = v.load('https://playo.co/venues?fbclid=IwAR_meta_click').pageView();
 
-  // Click ids are stored per network; the campaign stays paired with the gclid it came with.
+  // The gclid is still sent for Google's postback, but the Meta click is the last
+  // click now (LIN-3622), so the Google campaign is not last touch any more.
+  assert.strictEqual(view.traffic_source_name, 'meta');
   assert.strictEqual(view.gclid, 'Cj0_bof_click');
-  assert.strictEqual(view.gad_campaignid, '22329341502');
+  assert.strictEqual(view.gad_campaignid, '');
+  assert.strictEqual(view.ft_gad_campaignid, '22329341502');
 });
 
 test('the campaign id expires with the click, after 90 days', function () {
@@ -114,6 +117,7 @@ test('the campaign id expires with the click, after 90 days', function () {
 
   assert.strictEqual(view.gclid, '');
   assert.strictEqual(view.gad_campaignid, '');
+  assert.strictEqual(v.localStorage.getItem('lr_gad_campaignid'), null);
 });
 
 test('the Shopify context record carries the campaign id', function () {

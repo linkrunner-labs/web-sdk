@@ -321,6 +321,21 @@ test('localStorage failures degrade to the previous sessionStorage behaviour', f
   assert.strictEqual(purchase.event_name, 'purchase');
 });
 
+test('without localStorage, the tab\'s own UTMs still end 24 hours after the campaign click', function () {
+  var clock = createClock();
+  var localStorage = createStorage();
+  localStorage.failReads = true;
+  localStorage.failWrites = true;
+  var sessionStorage = createStorage();
+
+  loadSdk({ url: CAMPAIGN_URL, clock: clock, localStorage: localStorage, sessionStorage: sessionStorage }).pageView();
+  clock.advance(24 * HOUR + MINUTE);
+  var view = loadSdk({ url: 'https://playo.co/venues', clock: clock, localStorage: localStorage, sessionStorage: sessionStorage }).pageView();
+
+  assert.strictEqual(view.utm_campaign, '');
+  assert.strictEqual(sessionStorage.getItem('lr_utm_campaign'), null);
+});
+
 test('legacy sessionStorage-only state keeps working after upgrade', function () {
   var clock = createClock();
   // A visitor mid-session on the previous SDK build: UTMs in sessionStorage, no lr_lt.
