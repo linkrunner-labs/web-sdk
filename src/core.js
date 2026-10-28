@@ -255,6 +255,20 @@
   // can group a campaign's links by utm_id even after the landing page view.
   var UTM_KEYS = ['utm_source', 'utm_medium', 'utm_campaign', 'utm_id', 'utm_term', 'utm_content'];
 
+  // Partner sub slots filled per click; stored, replaced and expired with the last-touch UTMs.
+  var SUB_KEYS = ['lr_sub1', 'lr_sub2', 'lr_sub3', 'lr_sub4', 'lr_sub5'];
+  // Other MMPs' names for each slot, used only without lr_subN; 'source' only next to a utm_id.
+  var SUB_ALIASES = {
+    lr_sub1: ['af_siteid', 'af_sub1'],
+    lr_sub2: ['af_sub_siteid', 'source'],
+    lr_sub3: ['af_sub2'],
+    lr_sub4: ['af_sub3'],
+    lr_sub5: ['af_sub4']
+  };
+  var SUB_VALUE_MAX = 100;
+  // Everything stored as one last touch.
+  var TOUCH_KEYS = UTM_KEYS.concat(SUB_KEYS);
+
   var CLICK_ID_KEYS = [
     'gclid', 'gbraid', 'wbraid', 'fbclid', 'fbc', 'fbp',
     'ttclid', 'twclid', 'msclkid', 'li_fat_id', 'dclid', 'irclickid',
@@ -738,8 +752,8 @@
   // ahead of an earlier ad click (LIN-3622).
   function setLastTouchUtms(utms, ownTouch) {
     var now = Date.now();
-    for (var i = 0; i < UTM_KEYS.length; i++) {
-      var key = UTM_KEYS[i];
+    for (var i = 0; i < TOUCH_KEYS.length; i++) {
+      var key = TOUCH_KEYS[i];
       if (utms[key]) {
         safeSet(sessionStorage, 'lr_' + key, utms[key]);
       } else {
@@ -755,8 +769,8 @@
   }
 
   function clearTabUtmCopy() {
-    for (var i = 0; i < UTM_KEYS.length; i++) {
-      safeRemove(sessionStorage, 'lr_' + UTM_KEYS[i]);
+    for (var i = 0; i < TOUCH_KEYS.length; i++) {
+      safeRemove(sessionStorage, 'lr_' + TOUCH_KEYS[i]);
     }
     safeRemove(sessionStorage, 'lr_lt_t');
   }
@@ -773,6 +787,30 @@
     return t > 0 && Date.now() - t > LAST_TOUCH_TTL_MS;
   }
 
+  // A placeholder the partner left unfilled, raw or still encoded, carries no value.
+  function cleanSubValue(value) {
+    var v = String(value || '').trim();
+    if (/^(\{[^{}]*\}|%7B.*%7D)$/i.test(v)) return '';
+    return v.slice(0, SUB_VALUE_MAX);
+  }
+
+  // The landing's sub slots: lr_subN when the URL has it, else the first alias present.
+  function getSubParams(params) {
+    var subs = {};
+    for (var i = 0; i < SUB_KEYS.length; i++) {
+      var key = SUB_KEYS[i];
+      var names = [key].concat(SUB_ALIASES[key]);
+      for (var j = 0; j < names.length; j++) {
+        if (!Object.prototype.hasOwnProperty.call(params, names[j])) continue;
+        if (names[j] === 'source' && !params.utm_id) continue;
+        var value = cleanSubValue(params[names[j]]);
+        if (value) subs[key] = value;
+        break;
+      }
+    }
+    return subs;
+  }
+
   // ============================================================
   // PARAMETER PERSISTENCE — extract from URL, persist to storage
   // ============================================================
@@ -785,6 +823,8 @@
     var landingSeq = null;
     // Read before the click ids below write this landing's own first touch.
     var hadFirstTouchGoogleClick = hasGoogleClickId(getFirstTouchClickId);
+    var subs = getSubParams(params);
+    var setsFirstTouchCampaign = !!params.utm_id && !getFirstTouchUtm('utm_id');
 
     // UTMs → first-touch here, last-touch below (written as one set)
     for (var i = 0; i < UTM_KEYS.length; i++) {
@@ -793,6 +833,9 @@
         foundUtms[key] = params[key];
         setFirstTouchUtm(key, params[key]);
       }
+    }
+    if (setsFirstTouchCampaign) {
+      for (var s = 0; s < SUB_KEYS.length; s++) setFirstTouchUtm(SUB_KEYS[s], subs[SUB_KEYS[s]]);
     }
 
     // Click IDs → localStorage (last-touch with TTL)
@@ -867,8 +910,14 @@
       log('UTM params ignored, this visit is not a new touch', foundUtms);
     } else if (Object.keys(foundUtms).length) {
       // A tagged visit with no ad click takes last touch only with a utm_source to name it.
-      setLastTouchUtms(foundUtms, !carriesAdClick && !!foundUtms.utm_source);
-      log('UTM params found', foundUtms);
+      // The sub slots go in the same set, so a new touch clears the previous one's.
+      var touch = {};
+      for (var t = 0; t < TOUCH_KEYS.length; t++) {
+        var touchKey = TOUCH_KEYS[t];
+        if (foundUtms[touchKey] || subs[touchKey]) touch[touchKey] = foundUtms[touchKey] || subs[touchKey];
+      }
+      setLastTouchUtms(touch, !carriesAdClick && !!foundUtms.utm_source);
+      log('UTM params found', touch);
     } else if (newClickIdInUrl) {
       // A new click that carries no UTMs is still a new touch: drop the previous
       // campaign's UTMs rather than crediting them to this click. An empty record, not
@@ -888,8 +937,8 @@
     var record = getLastTouchRecord();
     if (!record && isTabUtmCopyExpired()) clearTabUtmCopy();
     var utms = {};
-    for (var i = 0; i < UTM_KEYS.length; i++) {
-      var key = UTM_KEYS[i];
+    for (var i = 0; i < TOUCH_KEYS.length; i++) {
+      var key = TOUCH_KEYS[i];
       utms[key] = (record ? record.u[key] : safeGet(sessionStorage, 'lr_' + key)) || '';
     }
     return utms;
@@ -897,8 +946,8 @@
 
   function getFirstTouchUtms() {
     var utms = {};
-    for (var i = 0; i < UTM_KEYS.length; i++) {
-      utms['ft_' + UTM_KEYS[i]] = getFirstTouchUtm(UTM_KEYS[i]);
+    for (var i = 0; i < TOUCH_KEYS.length; i++) {
+      utms['ft_' + TOUCH_KEYS[i]] = getFirstTouchUtm(TOUCH_KEYS[i]);
     }
     return utms;
   }
@@ -1554,7 +1603,7 @@
     var payload = buildPayload('identify', 'identify', null);
     send(payload);
   };
-  window.lr._version = '0.1.19';
+  window.lr._version = '0.1.20';
 
   // The landing's click ids and UTMs before any queued call is replayed: a call queued
   // before the script loaded was most likely made on this landing, so it belongs to its
