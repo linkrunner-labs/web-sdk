@@ -296,10 +296,24 @@
     'utm_source', 'utm_medium', 'utm_campaign', 'utm_term', 'utm_content'];
   var META_CLICK_PARAMS_MAX = 2000;
 
-  // Everything persisted and sent per click: the click ids plus the networks' campaigns.
-  var PERSISTED_CLICK_KEYS = CLICK_ID_KEYS.concat([GOOGLE_CAMPAIGN_KEY, META_CLICK_PARAMS_KEY]);
+  // An affiliate's web link carries the utm_id the partner is credited by and ends
+  // lr_click_id=<the partner's click macro>; the partner's postback needs that click id
+  // back. It is persisted like a click id, but bound to the utm_id it arrived with, so
+  // one partner's click id never pairs with another campaign's utm_id: it is taken only
+  // from a URL that carries a utm_id, and cleared when the campaign changes. It is no ad
+  // click, so it is not ranked for the last click: it follows the UTMs it arrived with.
+  var AFFILIATE_CLICK_KEY = 'lr_click_id';
+
+  // A partner that never expanded its macro sends the macro itself: {click_id}, or
+  // %7Bclick_id%7D once the URL was encoded twice. That is no click id at all, and the
+  // collector drops it too.
+  var UNEXPANDED_MACRO = /\{[^{}]*\}|%7B.*%7D/i;
+
+  // Everything persisted and sent per click: the click ids, the networks' campaigns, and
+  // the affiliate click id.
+  var PERSISTED_CLICK_KEYS = CLICK_ID_KEYS.concat([GOOGLE_CAMPAIGN_KEY, META_CLICK_PARAMS_KEY, AFFILIATE_CLICK_KEY]);
   // First touch has ft_utm_* for the Meta campaign, so it takes no Meta params of its own.
-  var FIRST_TOUCH_CLICK_KEYS = CLICK_ID_KEYS.concat([GOOGLE_CAMPAIGN_KEY]);
+  var FIRST_TOUCH_CLICK_KEYS = CLICK_ID_KEYS.concat([GOOGLE_CAMPAIGN_KEY, AFFILIATE_CLICK_KEY]);
 
   // The click ids ranked by when they were clicked, to find the last click. fbc and fbp
   // are left out: they are copied from the Meta pixel's cookies on every page view, so
@@ -426,6 +440,24 @@
       }
     } catch (e) { logError('Failed to parse query params', e); }
     return params;
+  }
+
+  // getQueryParams keeps a value only up to a second '=', which cuts the padding off a
+  // base64 click id (MTIzNDU2Nzg=). This reads one param whole, last one winning like
+  // there, without changing what every other param has always been read as.
+  function getWholeQueryParam(name) {
+    var value = '';
+    try {
+      var pairs = window.location.search.substring(1).split('&');
+      for (var i = 0; i < pairs.length; i++) {
+        var eq = pairs[i].indexOf('=');
+        var key = eq < 0 ? pairs[i] : pairs[i].substring(0, eq);
+        if (key && decodeURIComponent(key) === name) {
+          value = eq < 0 ? '' : decodeURIComponent(pairs[i].substring(eq + 1));
+        }
+      }
+    } catch (e) { logError('Failed to parse query param ' + name, e); }
+    return value;
   }
 
   function getReferringDomain(referrer) {
@@ -697,6 +729,34 @@
     }
   }
 
+  // The utm_id the stored lr_click_id arrived with, kept in the click id's own record
+  // (u): the last-touch UTMs expire after 24 hours, and the click id lives 90 days.
+  function getAffiliateClickUtmId() {
+    var record = getClickRecord(AFFILIATE_CLICK_KEY);
+    return (record && record.u) || '';
+  }
+
+  // Stores the lr_click_id of a landing that took the last touch (newTouch) with its
+  // utm_id, or clears the stored one when the campaign changed without one. A landing
+  // whose UTMs were ignored (a reload, a restored ad tab, the site's own link) leaves it
+  // alone, like the UTMs it pairs with. An lr_click_id with no utm_id beside it is
+  // ignored: no Linkrunner link produces it and no postback can use it. First touch takes
+  // it only with the first-touch utm_id, so ft_lr_click_id never pairs with another
+  // campaign's ft_utm_id.
+  function persistAffiliateClickId(params, newTouch, campaignChanged, firstTouchUtmId) {
+    var utmId = params.utm_id || '';
+    var clickId = utmId ? getWholeQueryParam(AFFILIATE_CLICK_KEY).trim() : '';
+    if (UNEXPANDED_MACRO.test(clickId)) clickId = '';
+
+    if (clickId && (!firstTouchUtmId || firstTouchUtmId === utmId)) setFirstTouchClickId(AFFILIATE_CLICK_KEY, clickId);
+    if (!newTouch) return;
+    if (clickId) {
+      safeSet(localStorage, 'lr_' + AFFILIATE_CLICK_KEY, JSON.stringify({ v: clickId, t: Date.now(), u: utmId }));
+    } else if (campaignChanged) {
+      safeRemove(localStorage, 'lr_' + AFFILIATE_CLICK_KEY);
+    }
+  }
+
   // ============================================================
   // UTM PERSISTENCE (sessionStorage + short-lived localStorage record for
   // last-touch, localStorage for first-touch)
@@ -821,10 +881,11 @@
     var foundClickIds = {};
     var newClickIds = {};
     var landingSeq = null;
-    // Read before the click ids below write this landing's own first touch.
+    // Read before the UTMs and click ids below write this landing's own first touch.
     var hadFirstTouchGoogleClick = hasGoogleClickId(getFirstTouchClickId);
+    var firstTouchUtmId = getFirstTouchUtm('utm_id');
     var subs = getSubParams(params);
-    var setsFirstTouchCampaign = !!params.utm_id && !getFirstTouchUtm('utm_id');
+    var setsFirstTouchCampaign = !!params.utm_id && !firstTouchUtmId;
 
     // UTMs → first-touch here, last-touch below (written as one set)
     for (var i = 0; i < UTM_KEYS.length; i++) {
@@ -898,6 +959,7 @@
     // Only an arrival that actually carries campaign params rewrites last-touch state.
     // Navigation with no campaign params — a payment gateway sending the visitor back —
     // leaves the stored set alone, which is what keeps attribution across the redirect.
+    var newTouch = false;
     if (Object.keys(foundUtms).length && carriesAdClick && !newClickIdInUrl) {
       // A reload or a restored tab of an ad landing whose click is already stored: its
       // UTMs were recorded with that click, or belong to an earlier one, so they neither
@@ -917,6 +979,7 @@
         if (foundUtms[touchKey] || subs[touchKey]) touch[touchKey] = foundUtms[touchKey] || subs[touchKey];
       }
       setLastTouchUtms(touch, !carriesAdClick && !!foundUtms.utm_source);
+      newTouch = true;
       log('UTM params found', touch);
     } else if (newClickIdInUrl) {
       // A new click that carries no UTMs is still a new touch: drop the previous
@@ -924,7 +987,15 @@
       // none, so another tab still open on an earlier landing cannot fall back to its
       // own sessionStorage copy of that landing's UTMs.
       setLastTouchUtms({});
+      newTouch = true;
     }
+
+    // The affiliate click id pairs with the last-touch utm_id, so only a new touch above
+    // replaces or clears it. The campaign changed with a new ad click, or with UTMs naming
+    // another utm_id than the stored lr_click_id arrived with. A site that copies its
+    // landing's UTMs onto internal links repeats the same utm_id, and keeps the click id.
+    var campaignChanged = newClickIdInUrl || (foundUtms.utm_id || '') !== getAffiliateClickUtmId();
+    persistAffiliateClickId(params, newTouch, campaignChanged, firstTouchUtmId);
 
     if (Object.keys(foundClickIds).length) log('Click IDs found', foundClickIds);
   }
@@ -1603,7 +1674,7 @@
     var payload = buildPayload('identify', 'identify', null);
     send(payload);
   };
-  window.lr._version = '0.1.20';
+  window.lr._version = '0.1.21';
 
   // The landing's click ids and UTMs before any queued call is replayed: a call queued
   // before the script loaded was most likely made on this landing, so it belongs to its
