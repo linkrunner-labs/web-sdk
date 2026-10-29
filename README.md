@@ -636,6 +636,7 @@ Events can be queued before the script loads — they'll be replayed automatical
 | Click IDs a newer click replaced (`lr_seen`), to recognise a reload of an earlier landing | `localStorage` | 90 days from each click, 10 per click ID |
 | Click sequence (`lr_click_seq`), the order of the visitor's ad clicks | `localStorage` | Until storage is cleared |
 | Last-touch UTMs (`utm_source`, `utm_campaign`, `utm_id`, …)        | `sessionStorage` + `localStorage` (`lr_lt`) | 24 hours from the campaign click |
+| Partner sub slots (`lr_sub1`…`lr_sub5`), with the last-touch UTMs | `sessionStorage` + `localStorage` (`lr_lt`) | Same as the last-touch UTMs; first touch (`ft_lr_sub*`) is written with `ft_utm_id` |
 | Visitor ID, user ID                                                | `localStorage`                          | Until storage is cleared     |
 | Session ID, session page count, entry page                         | `sessionStorage`                        | Tab session                  |
 
