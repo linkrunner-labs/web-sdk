@@ -95,6 +95,42 @@ test('internal links that repeat the landing\'s UTMs keep the click id', functio
   assert.strictEqual(purchase.lr_click_id, 'pa_click_111');
 });
 
+test('a reload of an earlier affiliate landing does not bring its click id back', function () {
+  var v = visitor();
+  v.load(PARTNER_A_LANDING).pageView();
+  v.clock.advance(MINUTE);
+  v.load(PARTNER_B_LANDING).pageView();
+  v.clock.advance(MINUTE);
+  // Partner A's tab reloaded is not a new touch: partner B keeps the last touch, and the
+  // click id stays the one that arrived with partner B's utm_id.
+  ['reload', 'back_forward'].forEach(function (navigationType) {
+    var view = loadSdk({
+      url: PARTNER_A_LANDING,
+      clock: v.clock,
+      localStorage: v.localStorage,
+      sessionStorage: createStorage(),
+      navigationType: navigationType,
+    }).pageView();
+
+    assert.strictEqual(view.utm_id, 'wc_partner_b', navigationType);
+    assert.strictEqual(view.lr_click_id, 'pb_click_222', navigationType);
+  });
+});
+
+test('a restored tab of an earlier ad landing keeps the click id', function () {
+  var metaAdLanding = META_LANDING + '&fbclid=IwAR_meta_click';
+  var v = visitor();
+  v.load(metaAdLanding).pageView();
+  v.clock.advance(MINUTE);
+  v.load(PARTNER_A_LANDING).pageView();
+  v.clock.advance(MINUTE);
+  // The Meta click is already stored, so its UTMs are ignored, and do not clear the click id.
+  var view = v.load(metaAdLanding).pageView();
+
+  assert.strictEqual(view.utm_id, 'wc_partner_a');
+  assert.strictEqual(view.lr_click_id, 'pa_click_111');
+});
+
 test('past the 24-hour last-touch window, only the same utm_id keeps the click id', function () {
   [
     { url: 'https://shop.example.com/product/42?' + PARTNER_A_UTMS, want: 'pa_click_111' },
@@ -275,6 +311,37 @@ test('the click id does not change the traffic source', function () {
   assert.strictEqual(view.lr_click_id, 'pc_click_333');
   assert.strictEqual(view.traffic_source_type, 'direct');
   assert.strictEqual(view.traffic_source_name, 'direct');
+});
+
+test('the click id is no ad click: it takes no click number and leaves the last click alone', function () {
+  var v = visitor();
+  v.load('https://shop.example.com/sale?fbclid=IwAR_meta_click').pageView();
+  v.clock.advance(MINUTE);
+  var view = v.load('https://shop.example.com/sale?utm_id=wc_partner_c&lr_click_id=pc_click_333').pageView();
+
+  assert.strictEqual(view.lr_click_id, 'pc_click_333');
+  assert.strictEqual(view.fbclid, 'IwAR_meta_click');
+  assert.strictEqual(view.traffic_source_name, 'meta');
+  assert.strictEqual(v.localStorage.getItem('lr_click_seq'), '1');
+  assert.strictEqual(JSON.parse(v.localStorage.getItem('lr_lr_click_id')).s, undefined);
+});
+
+test('a call queued before the script loaded carries the landing\'s click id', function () {
+  var v = visitor();
+  v.load(PARTNER_B_LANDING).pageView();
+  v.clock.advance(MINUTE);
+  var sdk = loadSdk({
+    url: PARTNER_A_LANDING,
+    clock: v.clock,
+    localStorage: v.localStorage,
+    sessionStorage: createStorage(),
+    queue: [['lead', { form: 'callback' }]],
+  });
+  var lead = sdk.sent[0];
+
+  assert.strictEqual(lead.event_name, 'lead');
+  assert.strictEqual(lead.utm_id, 'wc_partner_a');
+  assert.strictEqual(lead.lr_click_id, 'pa_click_111');
 });
 
 test('the Shopify context record carries the click id', function () {

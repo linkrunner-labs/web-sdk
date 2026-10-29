@@ -77,6 +77,7 @@ function loadSdk(options) {
   var sent = [];
   var attempts = [];
   var timers = [];
+  var listeners = {};
 
   // options.respond(endpoint) -> { ok, status } | 'network-error'
   // Default: every endpoint answers 200, which is what every test that does not
@@ -124,10 +125,14 @@ function loadSdk(options) {
     },
     screen: { width: 390, height: 844, colorDepth: 24 },
     history: { pushState: function () {}, replaceState: function () {} },
+    // options.navigationType ('reload', 'back_forward', ...) -> the navigation entry's type.
+    // options.legacyNavigationType (1 = reload, 2 = back/forward) -> performance.navigation
+    // only, as on Safari before 15.
     performance: {
-      getEntriesByType: function () {
-        return [];
+      getEntriesByType: function (type) {
+        return type === 'navigation' && options.navigationType ? [{ type: options.navigationType }] : [];
       },
+      navigation: options.legacyNavigationType ? { type: options.legacyNavigationType } : undefined,
     },
     // Pass options.crypto (e.g. require('crypto').webcrypto) to exercise the
     // payload-encryption path; the default stub has no subtle, which is what a
@@ -166,13 +171,15 @@ function loadSdk(options) {
       return timers.length;
     },
     clearTimeout: function () {},
-    addEventListener: function () {},
+    addEventListener: function (type, fn) { (listeners[type] = listeners[type] || []).push(fn); },
     innerWidth: 390,
     innerHeight: 844,
     devicePixelRatio: 3,
     LinkrunnerConfig: options.config || { token: 'test_token_193', spa: false, debug: false },
   };
   sandbox.window = sandbox;
+  // options.queue -> calls made through the pre-load stub before the script ran.
+  if (options.queue) sandbox.lr = { _q: options.queue };
   sandbox.self = sandbox;
 
   vm.createContext(sandbox);
@@ -193,6 +200,8 @@ function loadSdk(options) {
     localStorage: localStorage,
     sessionStorage: sessionStorage,
     flush: flush,
+    // Fires a window event (e.g. 'pagehide') at the listeners the SDK registered.
+    dispatch: function (type) { (listeners[type] || []).forEach(function (fn) { fn({ type: type }); }); },
     // Fires the deferred initial page view and returns its payload.
     pageView: function () {
       flush();

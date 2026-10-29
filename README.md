@@ -8,6 +8,7 @@ Web attribution SDK for [Linkrunner](https://linkrunner.io) — track page views
 - First-touch and last-touch UTM attribution
 - Last-touch UTMs survive payment gateway redirects and tab loss for 24 hours
 - Click ID persistence (gclid, fbclid, ttclid, etc.) with 90-day TTL
+- The latest tagged touch decides the traffic source: the last ad click, whichever network it came from, or a later tagged visit (an email link) for its 24 hours
 - Traffic source classification (paid, organic, social, AI search, referral, direct)
 - AI search engine detection (ChatGPT, Perplexity, Claude, Gemini, and more)
 - Bot detection
@@ -629,10 +630,14 @@ Events can be queued before the script loads — they'll be replayed automatical
 | What                                                              | Where                                   | Lifetime                     |
 | ----------------------------------------------------------------- | --------------------------------------- | ---------------------------- |
 | First-touch UTMs and click IDs (`ft_*`)                            | `localStorage`                          | Until storage is cleared     |
-| Last-touch click IDs (`gclid`, `fbclid`, …)                        | `localStorage`                          | 90 days                      |
-| Google campaign id (`gad_campaignid`), with the Google click       | `localStorage`                          | 90 days, replaced by every Google click |
+| Last-touch click IDs (`gclid`, `fbclid`, …)                        | `localStorage`                          | 90 days from the click (`fbc`/`fbp`: from the last visit) |
+| Google campaign id (`gad_campaignid`), with the Google click       | `localStorage`                          | 90 days, replaced by every Google click, sent only while that click is the last click |
+| Meta click's campaign, ad set and ad (`meta_click_params`), with the Meta click | `localStorage`              | 90 days, replaced by every Meta click, sent only while that click is the last click |
 | Affiliate click id (`lr_click_id`), with its `utm_id`              | `localStorage`                          | 90 days, cleared when the campaign changes (see below) |
+| Click IDs a newer click replaced (`lr_seen`), to recognise a reload of an earlier landing | `localStorage` | 90 days from each click, 10 per click ID |
+| Click sequence (`lr_click_seq`), the order of the visitor's ad clicks | `localStorage` | Until storage is cleared |
 | Last-touch UTMs (`utm_source`, `utm_campaign`, `utm_id`, …)        | `sessionStorage` + `localStorage` (`lr_lt`) | 24 hours from the campaign click |
+| Partner sub slots (`lr_sub1`…`lr_sub5`), with the last-touch UTMs | `sessionStorage` + `localStorage` (`lr_lt`) | Same as the last-touch UTMs; first touch (`ft_lr_sub*`) is written with `ft_utm_id` |
 | Visitor ID, user ID                                                | `localStorage`                          | Until storage is cleared     |
 | Session ID, session page count, entry page                         | `sessionStorage`                        | Tab session                  |
 
@@ -640,7 +645,8 @@ Last-touch UTMs are mirrored into `localStorage` because `sessionStorage` is per
 A payment gateway (or a bank 3DS page) that returns the visitor in a fresh tab would
 otherwise drop every `utm_*` value, so the purchase arrives with no campaign attached
 even though the click IDs still identify the network. The mirrored copy is replaced
-whenever a URL carries new UTMs, dropped when a URL carries a new click ID with no UTMs,
+whenever a URL carries new UTMs (except a reload or a reopened tab of an ad landing
+whose click is already stored), emptied when a URL carries a new click ID with no UTMs,
 and expires 24 hours after the campaign click. First-touch values are never affected.
 
 Two consequences of the `localStorage` mirror worth knowing:
@@ -666,9 +672,13 @@ value or an unexpanded macro such as `{click_id}`. A later URL with another `lr_
 and a `utm_id` replaces it. For its 90 days it is kept across pages with no campaign
 params and pages whose UTMs repeat the `utm_id` it arrived with, which covers sites that
 copy UTMs onto their internal links, even after the last-touch UTMs have expired. It is
-cleared by a URL with a new click ID from any network, or with UTMs whose `utm_id` is
-missing or differs from the one it arrived with. `ft_lr_click_id` is written once, and
-only when the visitor had no first-touch `utm_id` or the same one as this URL.
+cleared by a URL with a new ad click from any network, or with UTMs whose `utm_id` is
+missing or differs from the one it arrived with. A URL that is not a new touch (a reload
+or a restored tab of an ad landing, or a reload, back/forward or the site's own link to a
+tagged page) neither replaces nor clears it, the same as the last-touch UTMs it pairs
+with. It is not an ad click, so it never decides the traffic source or the last click.
+`ft_lr_click_id` is written once, and only when the visitor had no first-touch `utm_id`
+or the same one as this URL.
 
 ## Traffic source detection
 
@@ -687,6 +697,30 @@ The SDK automatically classifies traffic into these source types:
 | `campaign`       | UTM parameters present                           |
 | `referral`       | External referrer domain                         |
 | `direct`         | No referrer or parameters                        |
+
+Click IDs come first. When a visitor has clicked ads from more than one network, the
+most recent click decides the source: a Meta click after a Google click is Meta. The
+other networks' click IDs are kept and still sent, because each network's conversion
+postback needs its own, and the Google campaign id is sent only while the Google click
+is the last one; the same goes for the Meta click's campaign, ad set and ad
+(`meta_click_params`), which outlive its 24-hour UTMs. A reload or a restored tab of an
+ad landing is not a new click while that click is under 90 days old, even after a newer
+click from the same network: its UTMs neither replace the last click's nor restart their
+24-hour window. Clicks are ordered by a per-visitor sequence, not the device clock. Google's `gbraid` and `wbraid` are shared
+across clicks: next to a `gclid` they follow it, and on their own a repeated one is a new
+click unless the page was reloaded, reached with back/forward, or opened from the site
+itself (a repeated `gbraid` also only when it comes from Google or an app, with no
+referrer). When one URL carries new click IDs from two networks, a fixed order
+decides: Google, then Meta, then the rest. A call queued before the script loads is
+attributed to the landing it was made on, and a page left before its page view was due
+sends it on `pagehide`.
+
+A tagged visit with no click ID, such as an email or partner link with a `utm_source`,
+is the last touch after an earlier ad click while its UTMs last: its UTMs decide the
+source, and no network's campaign (`gad_campaignid`, `meta_click_params`) is sent with
+it. The ad click IDs are still sent for the postbacks, and once the visit's 24 hours are
+over the last ad click is the last touch again for the rest of its 90 days. A reload,
+back/forward, or the site's own link to a tagged page is not a new touch.
 
 ## License
 
