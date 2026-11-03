@@ -352,3 +352,17 @@ test('the Shopify context record carries the click id', function () {
   assert.strictEqual(ctx.fields.lr_click_id, 'pa_click_111');
   assert.strictEqual(ctx.fields.ft_lr_click_id, 'pa_click_111');
 });
+
+// A malformed escape anywhere in the query, ahead of the UTMs, in a value or in a key, costs its
+// own pair only.
+test('a malformed escape in another param keeps the UTMs and the click id', function () {
+  [
+    'https://shop.example.com/sale?ref=100%&' + PARTNER_A_UTMS + '&lr_click_id=pa_click_111',
+    'https://shop.example.com/sale?%E0%A4%A=1&' + PARTNER_A_UTMS + '&lr_click_id=pa_click_111',
+  ].forEach(function (url) {
+    var landing = visitor().load(url).pageView();
+
+    assert.strictEqual(landing.utm_id, 'wc_partner_a', url);
+    assert.strictEqual(landing.lr_click_id, 'pa_click_111', url);
+  });
+});

@@ -426,19 +426,21 @@
     }
   }
 
+  // A malformed escape (`ref=100%`) costs its own pair only: one bad param must not
+  // drop the UTMs and click id around it.
   function getQueryParams() {
     var params = {};
-    try {
-      var search = window.location.search.substring(1);
-      if (!search) return params;
-      var pairs = search.split('&');
-      for (var i = 0; i < pairs.length; i++) {
+    var search = window.location.search.substring(1);
+    if (!search) return params;
+    var pairs = search.split('&');
+    for (var i = 0; i < pairs.length; i++) {
+      try {
         var pair = pairs[i].split('=');
         if (pair[0]) {
           params[decodeURIComponent(pair[0])] = pair[1] ? decodeURIComponent(pair[1]) : '';
         }
-      }
-    } catch (e) { logError('Failed to parse query params', e); }
+      } catch (e) { logError('Failed to parse query param', e); }
+    }
     return params;
   }
 
@@ -447,16 +449,16 @@
   // there, without changing what every other param has always been read as.
   function getWholeQueryParam(name) {
     var value = '';
-    try {
-      var pairs = window.location.search.substring(1).split('&');
-      for (var i = 0; i < pairs.length; i++) {
+    var pairs = window.location.search.substring(1).split('&');
+    for (var i = 0; i < pairs.length; i++) {
+      try {
         var eq = pairs[i].indexOf('=');
         var key = eq < 0 ? pairs[i] : pairs[i].substring(0, eq);
         if (key && decodeURIComponent(key) === name) {
           value = eq < 0 ? '' : decodeURIComponent(pairs[i].substring(eq + 1));
         }
-      }
-    } catch (e) { logError('Failed to parse query param ' + name, e); }
+      } catch (e) { logError('Failed to parse query param ' + name, e); }
+    }
     return value;
   }
 
