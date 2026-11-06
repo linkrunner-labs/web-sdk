@@ -77,6 +77,7 @@ function loadSdk(options) {
   var sent = [];
   var attempts = [];
   var timers = [];
+  var injectedScripts = [];
   var listeners = {};
 
   // options.respond(endpoint) -> { ok, status } | 'network-error'
@@ -112,10 +113,22 @@ function loadSdk(options) {
       referrer: referrer,
       title: 'Playo',
       cookie: cookie,
+      // Third-party script loads (the Hotstar pixel) land here instead of the network.
+      createElement: function () {
+        return {};
+      },
+      head: {
+        appendChild: function (el) {
+          injectedScripts.push(el);
+        },
+      },
     },
     navigator: {
+      // options.userAgent / options.webdriver: to load the SDK as a crawler or an automated browser.
       userAgent:
+        options.userAgent ||
         'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 Safari/604.1',
+      webdriver: options.webdriver === true,
       language: 'en-US',
       languages: ['en-US'],
       platform: 'iPhone',
@@ -177,6 +190,10 @@ function loadSdk(options) {
     devicePixelRatio: 3,
     LinkrunnerConfig: options.config || { token: 'test_token_193', spa: false, debug: false },
   };
+  // options.hspixel: a pixel the page already runs. options.preQueue: lr.track() calls made
+  // before the script loaded, the way the npm stub queues them.
+  if (options.hspixel) sandbox.hspixel = options.hspixel;
+  if (options.preQueue) sandbox.lr = { _q: options.preQueue };
   sandbox.window = sandbox;
   // options.queue -> calls made through the pre-load stub before the script ran.
   if (options.queue) sandbox.lr = { _q: options.queue };
@@ -193,6 +210,7 @@ function loadSdk(options) {
     sandbox: sandbox,
     sent: sent,
     attempts: attempts,
+    injectedScripts: injectedScripts,
     endpoints: function () {
       return attempts.map(function (a) { return a.endpoint; });
     },
