@@ -124,8 +124,11 @@ function loadSdk(options) {
       },
     },
     navigator: {
+      // options.userAgent / options.webdriver: to load the SDK as a crawler or an automated browser.
       userAgent:
+        options.userAgent ||
         'Mozilla/5.0 (iPhone; CPU iPhone OS 17_0 like Mac OS X) AppleWebKit/605.1.15 Safari/604.1',
+      webdriver: options.webdriver === true,
       language: 'en-US',
       languages: ['en-US'],
       platform: 'iPhone',

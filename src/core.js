@@ -1608,6 +1608,12 @@
 
   function startHotstarPixel() {
     if (!HOTSTAR_PIXEL_ID) return;
+    // The pixel runs in the browser, so nothing downstream can filter a bot out of what
+    // Hotstar counts. Linkrunner keeps bot events flagged is_bot, but Hotstar must not see them.
+    if (isBot()) {
+      log('Bot traffic, not starting the Hotstar pixel');
+      return;
+    }
     try {
       // A pixel already on the page (the site's own snippet) is reused as is: initialising
       // it twice would double the page view.
@@ -1645,7 +1651,7 @@
   }
 
   function forwardToHotstar(eventName, eventData) {
-    if (!HOTSTAR_PIXEL_ID || typeof window.hspixel !== 'function') return;
+    if (!HOTSTAR_PIXEL_ID || typeof window.hspixel !== 'function' || isBot()) return;
     try {
       var hotstarEvent = HOTSTAR_EVENTS[eventName.toLowerCase().replace(/[^a-z0-9]/g, '')];
       if (!hotstarEvent) return;

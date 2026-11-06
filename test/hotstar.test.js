@@ -181,3 +181,31 @@ test('the pixel id can come from the script tag attribute', function () {
 
   assert.deepStrictEqual(hotstarCalls(sdk)[0], ['init', 'px-attr']);
 });
+
+test('bot traffic never starts or feeds the Hotstar pixel, but Linkrunner still gets the event', function () {
+  [
+    { userAgent: 'Mozilla/5.0 (compatible; Googlebot/2.1; +http://www.google.com/bot.html)' },
+    { webdriver: true },
+  ].forEach(function (bot) {
+    var sdk = loadSdk({ url: LANDING, config: PIXEL_CONFIG, userAgent: bot.userAgent, webdriver: bot.webdriver });
+    var sent = sdk.track('purchase', { amount: 400 });
+
+    assert.strictEqual(sdk.sandbox.hspixel, undefined);
+    assert.strictEqual(sdk.injectedScripts.length, 0);
+    assert.strictEqual(sent.event_name, 'purchase');
+    assert.strictEqual(sent.is_bot, 1);
+  });
+});
+
+test('a bot on a page that already runs its own hspixel is not forwarded to it', function () {
+  var calls = [];
+  var sdk = loadSdk({
+    url: LANDING,
+    config: PIXEL_CONFIG,
+    userAgent: 'Mozilla/5.0 (compatible; Googlebot/2.1)',
+    hspixel: function () { calls.push(Array.prototype.slice.call(arguments)); },
+  });
+  sdk.track('purchase', { amount: 400 });
+
+  assert.deepStrictEqual(plain(calls), []);
+});
