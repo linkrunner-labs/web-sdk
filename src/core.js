@@ -1712,7 +1712,7 @@
     var payload = buildPayload('identify', 'identify', null);
     send(payload);
   };
-  window.lr._version = '0.1.20';
+  window.lr._version = '0.1.21';
 
   // The landing's click ids and UTMs before any queued call is replayed: a call queued
   // before the script loaded was most likely made on this landing, so it belongs to its
