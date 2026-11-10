@@ -8,6 +8,7 @@ Web attribution SDK for [Linkrunner](https://linkrunner.io) — track page views
 - First-touch and last-touch UTM attribution
 - Last-touch UTMs survive payment gateway redirects and tab loss for 24 hours
 - Click ID persistence (gclid, fbclid, ttclid, etc.) with 90-day TTL
+- The latest tagged touch decides the traffic source: the last ad click, whichever network it came from, or a later tagged visit (an email link) for its 24 hours
 - Traffic source classification (paid, organic, social, AI search, referral, direct)
 - AI search engine detection (ChatGPT, Perplexity, Claude, Gemini, and more)
 - Bot detection
@@ -99,6 +100,7 @@ Events can be queued before the script loads — they'll be replayed automatical
 | `data-endpoint` | No       | A full URL or same-origin path. Only for a proxy you run yourself; overrides `data-domain` | — |
 | `data-spa`      | No       | Set to `"false"` to disable SPA mode                 | `true`                                 |
 | `data-debug`    | No       | `"true"` / `"false"` to force debug mode             | Auto                                   |
+| `data-hotstar-pixel-id` | No | Your JioHotstar pixel id. Loads Hotstar's pixel and forwards supported events. See [JioHotstar](#jiohotstar) | off |
 
 With neither set, events go to `https://api.linkrunner.io/web/ingest` — or to
 your own subdomain, if we have one on file for your token.
@@ -624,14 +626,99 @@ lr.track('event_name', { key: 'value' })
 
 Events can be queued before the script loads — they'll be replayed automatically once initialized.
 
+## Web-to-app: the app download link
+
+When your ads send visitors to your website first and a "Get the app" button sends them
+to the store, open your Linkrunner link from that button with
+`lr.getAppDownloadURL(baseUrl)`. It resolves to `baseUrl` with the visitor's last-touch
+ad click params, so Linkrunner credits the install to the Meta or Google ad, however
+many pages the visitor went through on the way:
+
+```js
+import { lr } from '@linkrunner/web'
+
+button.addEventListener('click', async () => {
+  window.location.href = await lr.getAppDownloadURL('https://link.your-app.com/')
+})
+
+// or: await window.lr.getAppDownloadURL('https://link.your-app.com/')
+```
+
+| Last touch      | Params added                                                                                   |
+| --------------- | ---------------------------------------------------------------------------------------------- |
+| Meta ad click   | `utm_source=facebook`, `utm_medium=paid_social`, `campaign_id`, `adset_id`, `ad_id`, `placement`, `site_source`, `fbclid` |
+| Google ad click | `gad_campaignid`, `gad_source`, `gclid` / `gbraid` / `wbraid`, `utm_source=google`, `utm_campaign` |
+| Anything else   | The last-touch `utm_*` params, if any                                                          |
+
+Params the click did not carry are left out, and your link's own path and params are
+kept. Last touch is decided as for events: the most recent ad click, unless a tagged
+visit with no ad click (an email, a partner link) came after it.
+
+The Meta values come from your landing page URL, so add these to the ad's URL
+parameters in Ads Manager:
+
+```
+utm_source=facebook&utm_medium=paid_social&campaign_id={{campaign.id}}&adset_id={{adset.id}}&ad_id={{ad.id}}&placement={{placement}}&site_source={{site_source_name}}
+```
+
+Meta adds `fbclid` itself. Meta's default `utm_id={{campaign.id}}` also works for
+`campaign_id`. For Google, keep auto-tagging on (it adds `gclid`, `gbraid`, `wbraid`,
+`gad_source` and `gad_campaignid`) and pass `utm_campaign` in the final URL suffix.
+
+The call returns a Promise everywhere. Called through the npm import before the script
+has loaded, it waits for it; if the script has not loaded within 3 seconds (an ad
+blocker, a network error), it resolves to `baseUrl` unchanged so the button still
+works. A `baseUrl` that is not an absolute `http(s)` URL rejects.
+
+## JioHotstar
+
+A visit that lands with `?hsClkId=...` (any casing) is stored as a JioHotstar click:
+the id is kept for 90 days, sent on every event as `hsclkid` / `ft_hsclkid`, and the
+traffic source reads `paid_display` / `jiohotstar`. This needs nothing in your setup.
+
+JioHotstar Ads reports web conversions from its own pixel, so to send conversions to
+it, give the SDK your pixel id (Ads Manager, Event Tracking, Pixel Id):
+
+```html
+<script src="https://cdn.linkrunner.io/web/v1/lr.js" data-token="YOUR_PROJECT_TOKEN"
+  data-hotstar-pixel-id="YOUR_PIXEL_ID" defer></script>
+```
+
+or `hotstarPixelId` in `window.LinkrunnerConfig` (or the `hotstarPixelId` prop of `LinkrunnerScript`).
+The SDK then loads Hotstar's pixel, sends `PageView` once per load, and forwards these
+`lr.track` events (name matched ignoring case, spaces and underscores):
+
+| `lr.track(...)` name                 | Hotstar event      | Parameters forwarded                                  |
+| ------------------------------------ | ------------------ | ----------------------------------------------------- |
+| `purchase`                           | `Purchase`         | `purchase_id`, `value` (or `amount`)                  |
+| `add_to_cart`                        | `AddToCart`        | `product_id`, `value`                                 |
+| `initiate_checkout`                  | `InitiateCheckout` | `product_id`, `value`, `discount`                     |
+| `lead`, `generate_lead`              | `GenerateLead`     | `lead_id`, `value`                                    |
+| `signup`, `sign_up`                  | `SignUp`           | `subscription_id`                                     |
+| `view_content`                       | `ViewContent`      | `content_id`, `content_type`                          |
+| `search`                             | `Search`           | `search_text`                                         |
+
+`cdf1` to `cdf5` are forwarded on every event; other keys are not sent to Hotstar.
+Events with any other name go to Linkrunner only.
+
+Without a pixel id the SDK makes no request to Hotstar. If the page already runs
+Hotstar's own pixel snippet, the SDK reuses it rather than initialising it again,
+so do not also call `hspixel('track', ...)` for events you send through `lr.track`.
+
 ## Attribution storage
 
 | What                                                              | Where                                   | Lifetime                     |
 | ----------------------------------------------------------------- | --------------------------------------- | ---------------------------- |
 | First-touch UTMs and click IDs (`ft_*`)                            | `localStorage`                          | Until storage is cleared     |
-| Last-touch click IDs (`gclid`, `fbclid`, …)                        | `localStorage`                          | 90 days                      |
-| Google campaign id (`gad_campaignid`), with the Google click       | `localStorage`                          | 90 days, replaced by every Google click |
+| Last-touch click IDs (`gclid`, `fbclid`, …)                        | `localStorage`                          | 90 days from the click (`fbc`/`fbp`: from the last visit) |
+| Google campaign id (`gad_campaignid`), with the Google click       | `localStorage`                          | 90 days, replaced by every Google click, sent only while that click is the last click |
+| Google `gad_source`, with the Google click                         | `localStorage`                          | 90 days, replaced by every Google click, used only by `getAppDownloadURL` (not sent on events) |
+| Meta click's campaign, ad set, ad, placement and site source (`meta_click_params`), with the Meta click | `localStorage` | 90 days, replaced by every Meta click, sent only while that click is the last click |
+| Affiliate click id (`lr_click_id`), with its `utm_id`              | `localStorage`                          | 90 days, cleared when the campaign changes (see below) |
+| Click IDs a newer click replaced (`lr_seen`), to recognise a reload of an earlier landing | `localStorage` | 90 days from each click, 10 per click ID |
+| Click sequence (`lr_click_seq`), the order of the visitor's ad clicks | `localStorage` | Until storage is cleared |
 | Last-touch UTMs (`utm_source`, `utm_campaign`, `utm_id`, …)        | `sessionStorage` + `localStorage` (`lr_lt`) | 24 hours from the campaign click |
+| Partner sub slots (`lr_sub1`…`lr_sub5`), with the last-touch UTMs | `sessionStorage` + `localStorage` (`lr_lt`) | Same as the last-touch UTMs; first touch (`ft_lr_sub*`) is written with `ft_utm_id` |
 | Visitor ID, user ID                                                | `localStorage`                          | Until storage is cleared     |
 | Session ID, session page count, entry page                         | `sessionStorage`                        | Tab session                  |
 
@@ -645,7 +732,8 @@ Last-touch UTMs are mirrored into `localStorage` because `sessionStorage` is per
 A payment gateway (or a bank 3DS page) that returns the visitor in a fresh tab would
 otherwise drop every `utm_*` value, so the purchase arrives with no campaign attached
 even though the click IDs still identify the network. The mirrored copy is replaced
-whenever a URL carries new UTMs, dropped when a URL carries a new click ID with no UTMs,
+whenever a URL carries new UTMs (except a reload or a reopened tab of an ad landing
+whose click is already stored), emptied when a URL carries a new click ID with no UTMs,
 and expires 24 hours after the campaign click. First-touch values are never affected.
 
 Two consequences of the `localStorage` mirror worth knowing:
@@ -662,6 +750,23 @@ survived. This is deliberate — a campaign should not take credit for a visit a
 — but it is narrower than the previous behaviour, where a `sessionStorage` value lived
 as long as the tab did. Click IDs are unaffected, so the traffic source still resolves.
 
+**The affiliate click id stays paired with the `utm_id` it arrived with.** Linkrunner's
+affiliate links carry a `utm_id`, which credits the partner, and end in
+`lr_click_id=<the partner's click id>`, which the partner's postback sends back. The SDK
+stores `lr_click_id` together with that `utm_id`, and only from a URL that carries both.
+It trims the value, keeps it whole (including base64 `=` padding), and ignores a blank
+value or an unexpanded macro such as `{click_id}`. A later URL with another `lr_click_id`
+and a `utm_id` replaces it. For its 90 days it is kept across pages with no campaign
+params and pages whose UTMs repeat the `utm_id` it arrived with, which covers sites that
+copy UTMs onto their internal links, even after the last-touch UTMs have expired. It is
+cleared by a URL with a new ad click from any network, or with UTMs whose `utm_id` is
+missing or differs from the one it arrived with. A URL that is not a new touch (a reload
+or a restored tab of an ad landing, or a reload, back/forward or the site's own link to a
+tagged page) neither replaces nor clears it, the same as the last-touch UTMs it pairs
+with. It is not an ad click, so it never decides the traffic source or the last click.
+`ft_lr_click_id` is written once, and only when the visitor had no first-touch `utm_id`
+or the same one as this URL.
+
 ## Traffic source detection
 
 The SDK automatically classifies traffic into these source types:
@@ -670,7 +775,7 @@ The SDK automatically classifies traffic into these source types:
 | ---------------- | ------------------------------------------------ |
 | `paid_search`    | gclid, gbraid, wbraid, oppref (ChatGPT Ads), msclkid, or UTM medium |
 | `paid_social`    | fbclid, ttclid, twclid, li_fat_id, or UTM medium |
-| `paid_display`   | dclid or UTM medium                              |
+| `paid_display`   | dclid, hsClkId (JioHotstar), or UTM medium       |
 | `paid_affiliate` | irclickid or UTM medium                          |
 | `ai_search`      | Referrer from ChatGPT, Perplexity, Claude, etc.  |
 | `organic_search` | Referrer from Google, Bing, DuckDuckGo, etc.     |
@@ -679,6 +784,30 @@ The SDK automatically classifies traffic into these source types:
 | `campaign`       | UTM parameters present                           |
 | `referral`       | External referrer domain                         |
 | `direct`         | No referrer or parameters                        |
+
+Click IDs come first. When a visitor has clicked ads from more than one network, the
+most recent click decides the source: a Meta click after a Google click is Meta. The
+other networks' click IDs are kept and still sent, because each network's conversion
+postback needs its own, and the Google campaign id is sent only while the Google click
+is the last one; the same goes for the Meta click's campaign, ad set and ad
+(`meta_click_params`), which outlive its 24-hour UTMs. A reload or a restored tab of an
+ad landing is not a new click while that click is under 90 days old, even after a newer
+click from the same network: its UTMs neither replace the last click's nor restart their
+24-hour window. Clicks are ordered by a per-visitor sequence, not the device clock. Google's `gbraid` and `wbraid` are shared
+across clicks: next to a `gclid` they follow it, and on their own a repeated one is a new
+click unless the page was reloaded, reached with back/forward, or opened from the site
+itself (a repeated `gbraid` also only when it comes from Google or an app, with no
+referrer). When one URL carries new click IDs from two networks, a fixed order
+decides: Google, then Meta, then the rest. A call queued before the script loads is
+attributed to the landing it was made on, and a page left before its page view was due
+sends it on `pagehide`.
+
+A tagged visit with no click ID, such as an email or partner link with a `utm_source`,
+is the last touch after an earlier ad click while its UTMs last: its UTMs decide the
+source, and no network's campaign (`gad_campaignid`, `meta_click_params`) is sent with
+it. The ad click IDs are still sent for the postbacks, and once the visit's 24 hours are
+over the last ad click is the last touch again for the rest of its 90 days. A reload,
+back/forward, or the site's own link to a tagged page is not a new touch.
 
 ## License
 
