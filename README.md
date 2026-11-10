@@ -626,6 +626,50 @@ lr.track('event_name', { key: 'value' })
 
 Events can be queued before the script loads — they'll be replayed automatically once initialized.
 
+## Web-to-app: the app download link
+
+When your ads send visitors to your website first and a "Get the app" button sends them
+to the store, open your Linkrunner link from that button with
+`lr.getAppDownloadURL(baseUrl)`. It resolves to `baseUrl` with the visitor's last-touch
+ad click params, so Linkrunner credits the install to the Meta or Google ad, however
+many pages the visitor went through on the way:
+
+```js
+import { lr } from '@linkrunner/web'
+
+button.addEventListener('click', async () => {
+  window.location.href = await lr.getAppDownloadURL('https://link.your-app.com/')
+})
+
+// or: await window.lr.getAppDownloadURL('https://link.your-app.com/')
+```
+
+| Last touch      | Params added                                                                                   |
+| --------------- | ---------------------------------------------------------------------------------------------- |
+| Meta ad click   | `utm_source=facebook`, `utm_medium=paid_social`, `campaign_id`, `adset_id`, `ad_id`, `placement`, `site_source`, `fbclid` |
+| Google ad click | `gad_campaignid`, `gad_source`, `gclid` / `gbraid` / `wbraid`, `utm_source=google`, `utm_campaign` |
+| Anything else   | The last-touch `utm_*` params, if any                                                          |
+
+Params the click did not carry are left out, and your link's own path and params are
+kept. Last touch is decided as for events: the most recent ad click, unless a tagged
+visit with no ad click (an email, a partner link) came after it.
+
+The Meta values come from your landing page URL, so add these to the ad's URL
+parameters in Ads Manager:
+
+```
+utm_source=facebook&utm_medium=paid_social&campaign_id={{campaign.id}}&adset_id={{adset.id}}&ad_id={{ad.id}}&placement={{placement}}&site_source={{site_source_name}}
+```
+
+Meta adds `fbclid` itself. Meta's default `utm_id={{campaign.id}}` also works for
+`campaign_id`. For Google, keep auto-tagging on (it adds `gclid`, `gbraid`, `wbraid`,
+`gad_source` and `gad_campaignid`) and pass `utm_campaign` in the final URL suffix.
+
+The call returns a Promise everywhere. Called through the npm import before the script
+has loaded, it waits for it; if the script has not loaded within 3 seconds (an ad
+blocker, a network error), it resolves to `baseUrl` unchanged so the button still
+works. A `baseUrl` that is not an absolute `http(s)` URL rejects.
+
 ## JioHotstar
 
 A visit that lands with `?hsClkId=...` (any casing) is stored as a JioHotstar click:
@@ -668,7 +712,8 @@ so do not also call `hspixel('track', ...)` for events you send through `lr.trac
 | First-touch UTMs and click IDs (`ft_*`)                            | `localStorage`                          | Until storage is cleared     |
 | Last-touch click IDs (`gclid`, `fbclid`, …)                        | `localStorage`                          | 90 days from the click (`fbc`/`fbp`: from the last visit) |
 | Google campaign id (`gad_campaignid`), with the Google click       | `localStorage`                          | 90 days, replaced by every Google click, sent only while that click is the last click |
-| Meta click's campaign, ad set and ad (`meta_click_params`), with the Meta click | `localStorage`              | 90 days, replaced by every Meta click, sent only while that click is the last click |
+| Google `gad_source`, with the Google click                         | `localStorage`                          | 90 days, replaced by every Google click, used only by `getAppDownloadURL` (not sent on events) |
+| Meta click's campaign, ad set, ad, placement and site source (`meta_click_params`), with the Meta click | `localStorage` | 90 days, replaced by every Meta click, sent only while that click is the last click |
 | Click IDs a newer click replaced (`lr_seen`), to recognise a reload of an earlier landing | `localStorage` | 90 days from each click, 10 per click ID |
 | Click sequence (`lr_click_seq`), the order of the visitor's ad clicks | `localStorage` | Until storage is cleared |
 | Last-touch UTMs (`utm_source`, `utm_campaign`, `utm_id`, …)        | `sessionStorage` + `localStorage` (`lr_lt`) | 24 hours from the campaign click |
