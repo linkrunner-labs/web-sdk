@@ -39,6 +39,11 @@ interface LinkrunnerScriptProps {
   scriptSrc?: string
   spa?: boolean
   debug?: boolean
+  /**
+   * Your JioHotstar pixel id. When set, the SDK loads Hotstar's pixel and forwards
+   * the events Hotstar supports (purchase, signup, …) from `lr.track`.
+   */
+  hotstarPixelId?: string
 }
 
 export function LinkrunnerScript({
@@ -48,6 +53,7 @@ export function LinkrunnerScript({
   scriptSrc = CDN_SCRIPT_SRC,
   spa,
   debug,
+  hotstarPixelId,
 }: LinkrunnerScriptProps) {
   const dataAttrs: Record<string, string> = {
     'data-token': token,
@@ -59,6 +65,10 @@ export function LinkrunnerScript({
 
   if (endpoint) {
     dataAttrs['data-endpoint'] = endpoint
+  }
+
+  if (hotstarPixelId) {
+    dataAttrs['data-hotstar-pixel-id'] = hotstarPixelId
   }
 
   if (spa === false) {
