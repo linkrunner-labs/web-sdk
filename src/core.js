@@ -222,6 +222,12 @@
 
   var ENCRYPTION_ENABLED = !!(ENCRYPTION_PUBLIC_KEY && ENCRYPTION_KEY_ID);
 
+  // JioHotstar pixel id. Set it and the SDK loads Hotstar's own pixel and forwards the
+  // matching events to it (see the HOTSTAR PIXEL section). Empty means no Hotstar request.
+  var HOTSTAR_PIXEL_ID = String(configObj.hotstarPixelId
+    || (scriptTag && scriptTag.getAttribute('data-hotstar-pixel-id'))
+    || '').trim();
+
   var SPA_ENABLED = configObj.spa !== false
     && !(scriptTag && scriptTag.getAttribute('data-spa') === 'false');
 
@@ -274,7 +280,11 @@
     'ttclid', 'twclid', 'msclkid', 'li_fat_id', 'dclid', 'irclickid',
     // ChatGPT Ads (OpenAI) click id. The ChatGPT pixel reads it for itself, but the
     // Conversions API does not, so Linkrunner persists it for web postbacks.
-    'oppref'
+    'oppref',
+    // JioHotstar click id, from the `hsClkId` landing-URL param (stored lowercase, see
+    // normalizeHotstarClickId). Hotstar's own pixel keeps it for 7 days; this keeps it for
+    // the 90 days every other click id gets, so a later conversion still ties to the ad.
+    'hsclkid'
   ];
 
   // Google auto-tagging puts the campaign id (gad_campaignid) on the landing URL only,
@@ -285,14 +295,19 @@
   // inheriting the previous click's campaign.
   var GOOGLE_CLICK_ID_KEYS = ['gclid', 'gbraid', 'wbraid'];
   var GOOGLE_CAMPAIGN_KEY = 'gad_campaignid';
+  // gad_source rides along with gad_campaignid the same way. It is kept only for
+  // getAppDownloadURL, not sent on events (LIN-4884).
+  var GOOGLE_SOURCE_KEY = 'gad_source';
 
   // The Meta click's own campaign, ad set and ad, stored with the fbclid for the same
   // reason as gad_campaignid: last-touch UTMs last 24 hours, the click 90 days. A query
   // string of the landing's params below, replaced by every new Meta click (LIN-3622).
   var META_CLICK_PARAMS_KEY = 'meta_click_params';
   // Ids first: the collector cuts a field at 2048 characters, and long encoded names must
-  // not push them out. Whole params only, up to META_CLICK_PARAMS_MAX.
+  // not push them out. Whole params only, up to META_CLICK_PARAMS_MAX. placement and
+  // site_source ({{placement}}, {{site_source_name}}) are for getAppDownloadURL (LIN-4884).
   var META_CLICK_PARAM_NAMES = ['utm_id', 'campaign_id', 'adset_id', 'ad_set_id', 'ad_id',
+    'placement', 'site_source',
     'utm_source', 'utm_medium', 'utm_campaign', 'utm_term', 'utm_content'];
   var META_CLICK_PARAMS_MAX = 2000;
 
@@ -670,6 +685,14 @@
     return ids;
   }
 
+  // The last touch's ad click ids. A tagged visit with no ad click after the last ad
+  // click is the last touch while its UTMs last (LIN-3622): it has no click ids, and its
+  // UTMs decide the source.
+  function getLastTouchClickIds() {
+    var lastTouch = getLastTouchRecord();
+    return lastTouch && lastTouch.o ? {} : getLastClickIds();
+  }
+
   function setFirstTouchClickId(key, value) {
     var ftKey = 'lr_ft_' + key;
     if (!safeGet(localStorage, ftKey) && value) {
@@ -699,6 +722,7 @@
   // the click's gad_campaignid, or nothing. A reload of the same click leaves it alone,
   // so it expires with its click. First touch takes it only from the visitor's first
   // Google click, so ft_gad_campaignid never pairs with another click's ft_gclid.
+  // gad_source is replaced the same way, with no first touch.
   function persistGoogleCampaign(params, newClickIds, hadFirstTouchGoogleClick) {
     if (!hasGoogleClickId(function (key) { return newClickIds[key]; })) return;
 
@@ -708,6 +732,13 @@
       if (!hadFirstTouchGoogleClick) setFirstTouchClickId(GOOGLE_CAMPAIGN_KEY, campaignId);
     } else {
       safeRemove(localStorage, 'lr_' + GOOGLE_CAMPAIGN_KEY);
+    }
+
+    var source = params[GOOGLE_SOURCE_KEY] || '';
+    if (source) {
+      setClickId(GOOGLE_SOURCE_KEY, source);
+    } else {
+      safeRemove(localStorage, 'lr_' + GOOGLE_SOURCE_KEY);
     }
   }
 
@@ -877,8 +908,21 @@
   // PARAMETER PERSISTENCE — extract from URL, persist to storage
   // ============================================================
 
+  // Hotstar's pixel reads the param case-insensitively and its docs write it `hsClkId`,
+  // so accept any casing and store it under the lowercase key every other click id uses.
+  function normalizeHotstarClickId(params) {
+    var names = Object.keys(params);
+    for (var i = 0; i < names.length; i++) {
+      if (names[i] !== 'hsclkid' && names[i].toLowerCase() === 'hsclkid' && params[names[i]]) {
+        params.hsclkid = params[names[i]];
+        return;
+      }
+    }
+  }
+
   function persistParams() {
     var params = getQueryParams();
+    normalizeHotstarClickId(params);
     var foundUtms = {};
     var foundClickIds = {};
     var newClickIds = {};
@@ -1058,6 +1102,7 @@
     if (clickIds.twclid) return { type: 'paid_social', name: 'twitter' };
     if (clickIds.li_fat_id) return { type: 'paid_social', name: 'linkedin' };
     if (clickIds.dclid) return { type: 'paid_display', name: 'google' };
+    if (clickIds.hsclkid) return { type: 'paid_display', name: 'jiohotstar' };
     if (clickIds.irclickid) return { type: 'paid_affiliate', name: 'impact' };
 
     // 2. UTM medium based
@@ -1437,11 +1482,9 @@
   function buildPayload(eventType, eventName, eventData) {
     var utms = getPersistedUtms();
     var clickIds = getPersistedClickIds();
-    // A tagged visit with no ad click after the last ad click is the last touch while its
-    // UTMs last (LIN-3622): its UTMs decide the source, and no network's campaign is sent
-    // with it. Every click id is still sent, for each network's postback.
-    var lastTouch = getLastTouchRecord();
-    var lastClickIds = lastTouch && lastTouch.o ? {} : getLastClickIds();
+    // Every click id is still sent, for each network's postback; only the last touch's
+    // decide the source and the networks' campaigns.
+    var lastClickIds = getLastTouchClickIds();
     // The Google campaign belongs to the Google click, so it is sent as last touch only
     // while that click is the last click.
     if (!hasGoogleClickId(function (key) { return lastClickIds[key]; })) clickIds[GOOGLE_CAMPAIGN_KEY] = '';
@@ -1625,6 +1668,90 @@
     send(payload);
   }
 
+  // ============================================================
+  // HOTSTAR PIXEL (opt-in: data-hotstar-pixel-id / LinkrunnerConfig.hotstarPixelId)
+  // ============================================================
+
+  // JioHotstar Ads measures web conversions through its own browser pixel, so a conversion
+  // only reaches Hotstar if that pixel sees it. With a pixel id configured we load the
+  // pixel exactly as Hotstar's snippet does and forward the events it supports, so one
+  // lr.track() call reports to both. Hotstar documents no server-side API.
+  var HOTSTAR_PIXEL_SRC = 'https://hspx.hotstar.com/static/pixel/hspixel.js';
+
+  // Our event names, lowercased with everything but letters and digits removed, to
+  // Hotstar's standard events. PageView is not here: the base pixel sends it once on load.
+  var HOTSTAR_EVENTS = {
+    viewcontent: 'ViewContent',
+    purchase: 'Purchase',
+    addtocart: 'AddToCart',
+    initiatecheckout: 'InitiateCheckout',
+    generatelead: 'GenerateLead',
+    lead: 'GenerateLead',
+    signup: 'SignUp',
+    search: 'Search'
+  };
+
+  // The parameters Hotstar documents for those events. Anything else is not forwarded:
+  // it would be ignored at best, and a sixth custom parameter makes Hotstar fail the call.
+  var HOTSTAR_PARAMS = [
+    'content_id', 'content_type', 'purchase_id', 'value', 'product_id', 'discount',
+    'lead_id', 'subscription_id', 'search_text', 'cdf1', 'cdf2', 'cdf3', 'cdf4', 'cdf5'
+  ];
+
+  function startHotstarPixel() {
+    if (!HOTSTAR_PIXEL_ID) return;
+    // The pixel runs in the browser, so nothing downstream can filter a bot out of what
+    // Hotstar counts. Linkrunner keeps bot events flagged is_bot, but Hotstar must not see them.
+    if (isBot()) {
+      log('Bot traffic, not starting the Hotstar pixel');
+      return;
+    }
+    try {
+      // A pixel already on the page (the site's own snippet) is reused as is: initialising
+      // it twice would double the page view.
+      if (typeof window.hspixel === 'function') {
+        log('Hotstar pixel already on the page, reusing it');
+        return;
+      }
+      var pixel = window.hspixel = function() {
+        if (pixel.process) pixel.process.apply(pixel, arguments);
+        else pixel.queue.push(arguments);
+      };
+      pixel.queue = [];
+      pixel.t = 1 * new Date();
+      var script = document.createElement('script');
+      script.async = true;
+      script.src = HOTSTAR_PIXEL_SRC;
+      (document.head || document.documentElement).appendChild(script);
+      pixel('init', HOTSTAR_PIXEL_ID);
+      pixel('track', 'PageView');
+      log('Hotstar pixel started', { pixelId: HOTSTAR_PIXEL_ID });
+    } catch (e) { logError('Failed to start the Hotstar pixel', e); }
+  }
+
+  function hotstarParams(eventData) {
+    var params = {};
+    if (!eventData || typeof eventData !== 'object') return params;
+    for (var i = 0; i < HOTSTAR_PARAMS.length; i++) {
+      var key = HOTSTAR_PARAMS[i];
+      var value = eventData[key];
+      if (key === 'value' && (value === undefined || value === null)) value = eventData.amount;
+      if (value === undefined || value === null || typeof value === 'object') continue;
+      params[key] = String(value);
+    }
+    return params;
+  }
+
+  function forwardToHotstar(eventName, eventData) {
+    if (!HOTSTAR_PIXEL_ID || typeof window.hspixel !== 'function' || isBot()) return;
+    try {
+      var hotstarEvent = HOTSTAR_EVENTS[eventName.toLowerCase().replace(/[^a-z0-9]/g, '')];
+      if (!hotstarEvent) return;
+      window.hspixel('track', hotstarEvent, hotstarParams(eventData));
+      log('Forwarded to Hotstar', { event: hotstarEvent });
+    } catch (e) { logError('Failed to forward event to Hotstar', e); }
+  }
+
   function trackCustomEvent(eventName, eventData) {
     log('track() called', { eventName: eventName, eventData: eventData });
     if (!eventName || typeof eventName !== 'string') {
@@ -1633,6 +1760,7 @@
     }
     var payload = buildPayload('custom', eventName, eventData || null);
     send(payload);
+    forwardToHotstar(eventName, eventData);
   }
 
   // ============================================================
@@ -1661,6 +1789,98 @@
   }
 
   // ============================================================
+  // APP DOWNLOAD URL (LIN-4884)
+  // ============================================================
+
+  // A web-to-app flow lands the ad click on the customer's site and sends the visitor to
+  // the store from a CTA, often several pages later. The CTA opens the project's
+  // Linkrunner link with the last touch's ad click params, in the shape the link gateway
+  // reads for Meta and Google web-to-app clicks, so the install is credited to the ad.
+
+  // The Meta params the link carries, read from the stored Meta click; each name's
+  // fallbacks follow it.
+  var META_APP_LINK_PARAMS = [
+    ['campaign_id', 'utm_id'],
+    ['adset_id', 'ad_set_id'],
+    ['ad_id'],
+    ['placement'],
+    ['site_source']
+  ];
+
+  // The stored Meta click's params as an object, only when they belong to this fbclid.
+  function getMetaClickParams(fbclid) {
+    var params = {};
+    var record = getClickRecord(META_CLICK_PARAMS_KEY);
+    if (!record || record.fbclid !== fbclid) return params;
+    var pairs = String(record.v).split('&');
+    for (var i = 0; i < pairs.length; i++) {
+      var at = pairs[i].indexOf('=');
+      if (at < 1) continue;
+      try {
+        params[decodeURIComponent(pairs[i].slice(0, at))] = decodeURIComponent(pairs[i].slice(at + 1));
+      } catch (e) { logError('Failed to parse stored Meta click param', e); }
+    }
+    return params;
+  }
+
+  // The link params for the last touch, in order, as [name, value] pairs.
+  function getAppLinkParams() {
+    var lastClickIds = getLastTouchClickIds();
+    var utms = getPersistedUtms();
+    var params = [];
+
+    // Google before Meta when one landing carried both, as classifyTrafficSource does.
+    if (hasGoogleClickId(function (key) { return lastClickIds[key]; })) {
+      params.push([GOOGLE_CAMPAIGN_KEY, getClickId(GOOGLE_CAMPAIGN_KEY)]);
+      params.push([GOOGLE_SOURCE_KEY, getClickId(GOOGLE_SOURCE_KEY)]);
+      for (var g = 0; g < GOOGLE_CLICK_ID_KEYS.length; g++) {
+        params.push([GOOGLE_CLICK_ID_KEYS[g], lastClickIds[GOOGLE_CLICK_ID_KEYS[g]]]);
+      }
+      params.push(['utm_source', 'google']);
+      params.push(['utm_campaign', utms.utm_campaign]);
+    } else if (lastClickIds.fbclid) {
+      var meta = getMetaClickParams(lastClickIds.fbclid);
+      params.push(['utm_source', 'facebook']);
+      params.push(['utm_medium', 'paid_social']);
+      for (var m = 0; m < META_APP_LINK_PARAMS.length; m++) {
+        var names = META_APP_LINK_PARAMS[m];
+        var value = '';
+        for (var n = 0; n < names.length && !value; n++) value = meta[names[n]] || '';
+        params.push([names[0], value]);
+      }
+      params.push(['fbclid', lastClickIds.fbclid]);
+    } else {
+      for (var u = 0; u < UTM_KEYS.length; u++) params.push([UTM_KEYS[u], utms[UTM_KEYS[u]]]);
+    }
+
+    return params.filter(function (param) { return !!param[1]; });
+  }
+
+  function buildAppDownloadURL(baseUrl) {
+    var url;
+    try { url = new URL(String(baseUrl || '')); } catch (e) { url = null; }
+    if (!url || (url.protocol !== 'https:' && url.protocol !== 'http:')) {
+      throw new TypeError('getAppDownloadURL() needs an absolute http(s) URL, got: ' + baseUrl);
+    }
+    var params = getAppLinkParams();
+    for (var i = 0; i < params.length; i++) url.searchParams.set(params[i][0], params[i][1]);
+    return url.href;
+  }
+
+  // A Promise, so it has one signature whether or not the script has loaded yet (the npm
+  // stub queues the call until it has).
+  function getAppDownloadURL(baseUrl) {
+    try {
+      var href = buildAppDownloadURL(baseUrl);
+      log('getAppDownloadURL()', href);
+      return Promise.resolve(href);
+    } catch (e) {
+      logError('getAppDownloadURL() failed', e);
+      return Promise.reject(e);
+    }
+  }
+
+  // ============================================================
   // PUBLIC API
   // ============================================================
 
@@ -1676,13 +1896,17 @@
     var payload = buildPayload('identify', 'identify', null);
     send(payload);
   };
-  window.lr._version = '0.1.21';
+  window.lr.getAppDownloadURL = getAppDownloadURL;
+  window.lr._version = '0.1.23';
 
   // The landing's click ids and UTMs before any queued call is replayed: a call queued
   // before the script loaded was most likely made on this landing, so it belongs to its
   // click, not to the visitor's previous one.
   expireOldClickIds();
   persistParams();
+
+  // Before the replay below, so events queued ahead of the script reach Hotstar too.
+  startHotstarPixel();
 
   // Replay queued events
   if (existingQueue.length) log('Replaying ' + existingQueue.length + ' queued event(s)');
@@ -1691,6 +1915,9 @@
       var queued = existingQueue[qi];
       if (queued[0] === '__identify') {
         window.lr.identify(queued[1]);
+      } else if (queued[0] === '__getAppDownloadURL') {
+        // [name, baseUrl, resolve, reject], from the npm stub.
+        getAppDownloadURL(queued[1]).then(queued[2], queued[3]);
       } else {
         trackCustomEvent.apply(null, queued);
       }

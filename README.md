@@ -100,6 +100,7 @@ Events can be queued before the script loads — they'll be replayed automatical
 | `data-endpoint` | No       | A full URL or same-origin path. Only for a proxy you run yourself; overrides `data-domain` | — |
 | `data-spa`      | No       | Set to `"false"` to disable SPA mode                 | `true`                                 |
 | `data-debug`    | No       | `"true"` / `"false"` to force debug mode             | Auto                                   |
+| `data-hotstar-pixel-id` | No | Your JioHotstar pixel id. Loads Hotstar's pixel and forwards supported events. See [JioHotstar](#jiohotstar) | off |
 
 With neither set, events go to `https://api.linkrunner.io/web/ingest` — or to
 your own subdomain, if we have one on file for your token.
@@ -625,6 +626,85 @@ lr.track('event_name', { key: 'value' })
 
 Events can be queued before the script loads — they'll be replayed automatically once initialized.
 
+## Web-to-app: the app download link
+
+When your ads send visitors to your website first and a "Get the app" button sends them
+to the store, open your Linkrunner link from that button with
+`lr.getAppDownloadURL(baseUrl)`. It resolves to `baseUrl` with the visitor's last-touch
+ad click params, so Linkrunner credits the install to the Meta or Google ad, however
+many pages the visitor went through on the way:
+
+```js
+import { lr } from '@linkrunner/web'
+
+button.addEventListener('click', async () => {
+  window.location.href = await lr.getAppDownloadURL('https://link.your-app.com/')
+})
+
+// or: await window.lr.getAppDownloadURL('https://link.your-app.com/')
+```
+
+| Last touch      | Params added                                                                                   |
+| --------------- | ---------------------------------------------------------------------------------------------- |
+| Meta ad click   | `utm_source=facebook`, `utm_medium=paid_social`, `campaign_id`, `adset_id`, `ad_id`, `placement`, `site_source`, `fbclid` |
+| Google ad click | `gad_campaignid`, `gad_source`, `gclid` / `gbraid` / `wbraid`, `utm_source=google`, `utm_campaign` |
+| Anything else   | The last-touch `utm_*` params, if any                                                          |
+
+Params the click did not carry are left out, and your link's own path and params are
+kept. Last touch is decided as for events: the most recent ad click, unless a tagged
+visit with no ad click (an email, a partner link) came after it.
+
+The Meta values come from your landing page URL, so add these to the ad's URL
+parameters in Ads Manager:
+
+```
+utm_source=facebook&utm_medium=paid_social&campaign_id={{campaign.id}}&adset_id={{adset.id}}&ad_id={{ad.id}}&placement={{placement}}&site_source={{site_source_name}}
+```
+
+Meta adds `fbclid` itself. Meta's default `utm_id={{campaign.id}}` also works for
+`campaign_id`. For Google, keep auto-tagging on (it adds `gclid`, `gbraid`, `wbraid`,
+`gad_source` and `gad_campaignid`) and pass `utm_campaign` in the final URL suffix.
+
+The call returns a Promise everywhere. Called through the npm import before the script
+has loaded, it waits for it; if the script has not loaded within 3 seconds (an ad
+blocker, a network error), it resolves to `baseUrl` unchanged so the button still
+works. A `baseUrl` that is not an absolute `http(s)` URL rejects.
+
+## JioHotstar
+
+A visit that lands with `?hsClkId=...` (any casing) is stored as a JioHotstar click:
+the id is kept for 90 days, sent on every event as `hsclkid` / `ft_hsclkid`, and the
+traffic source reads `paid_display` / `jiohotstar`. This needs nothing in your setup.
+
+JioHotstar Ads reports web conversions from its own pixel, so to send conversions to
+it, give the SDK your pixel id (Ads Manager, Event Tracking, Pixel Id):
+
+```html
+<script src="https://cdn.linkrunner.io/web/v1/lr.js" data-token="YOUR_PROJECT_TOKEN"
+  data-hotstar-pixel-id="YOUR_PIXEL_ID" defer></script>
+```
+
+or `hotstarPixelId` in `window.LinkrunnerConfig` (or the `hotstarPixelId` prop of `LinkrunnerScript`).
+The SDK then loads Hotstar's pixel, sends `PageView` once per load, and forwards these
+`lr.track` events (name matched ignoring case, spaces and underscores):
+
+| `lr.track(...)` name                 | Hotstar event      | Parameters forwarded                                  |
+| ------------------------------------ | ------------------ | ----------------------------------------------------- |
+| `purchase`                           | `Purchase`         | `purchase_id`, `value` (or `amount`)                  |
+| `add_to_cart`                        | `AddToCart`        | `product_id`, `value`                                 |
+| `initiate_checkout`                  | `InitiateCheckout` | `product_id`, `value`, `discount`                     |
+| `lead`, `generate_lead`              | `GenerateLead`     | `lead_id`, `value`                                    |
+| `signup`, `sign_up`                  | `SignUp`           | `subscription_id`                                     |
+| `view_content`                       | `ViewContent`      | `content_id`, `content_type`                          |
+| `search`                             | `Search`           | `search_text`                                         |
+
+`cdf1` to `cdf5` are forwarded on every event; other keys are not sent to Hotstar.
+Events with any other name go to Linkrunner only.
+
+Without a pixel id the SDK makes no request to Hotstar. If the page already runs
+Hotstar's own pixel snippet, the SDK reuses it rather than initialising it again,
+so do not also call `hspixel('track', ...)` for events you send through `lr.track`.
+
 ## Attribution storage
 
 | What                                                              | Where                                   | Lifetime                     |
@@ -632,7 +712,8 @@ Events can be queued before the script loads — they'll be replayed automatical
 | First-touch UTMs and click IDs (`ft_*`)                            | `localStorage`                          | Until storage is cleared     |
 | Last-touch click IDs (`gclid`, `fbclid`, …)                        | `localStorage`                          | 90 days from the click (`fbc`/`fbp`: from the last visit) |
 | Google campaign id (`gad_campaignid`), with the Google click       | `localStorage`                          | 90 days, replaced by every Google click, sent only while that click is the last click |
-| Meta click's campaign, ad set and ad (`meta_click_params`), with the Meta click | `localStorage`              | 90 days, replaced by every Meta click, sent only while that click is the last click |
+| Google `gad_source`, with the Google click                         | `localStorage`                          | 90 days, replaced by every Google click, used only by `getAppDownloadURL` (not sent on events) |
+| Meta click's campaign, ad set, ad, placement and site source (`meta_click_params`), with the Meta click | `localStorage` | 90 days, replaced by every Meta click, sent only while that click is the last click |
 | Affiliate click id (`lr_click_id`), with its `utm_id`              | `localStorage`                          | 90 days, cleared when the campaign changes (see below) |
 | Click IDs a newer click replaced (`lr_seen`), to recognise a reload of an earlier landing | `localStorage` | 90 days from each click, 10 per click ID |
 | Click sequence (`lr_click_seq`), the order of the visitor's ad clicks | `localStorage` | Until storage is cleared |
@@ -688,7 +769,7 @@ The SDK automatically classifies traffic into these source types:
 | ---------------- | ------------------------------------------------ |
 | `paid_search`    | gclid, gbraid, wbraid, oppref (ChatGPT Ads), msclkid, or UTM medium |
 | `paid_social`    | fbclid, ttclid, twclid, li_fat_id, or UTM medium |
-| `paid_display`   | dclid or UTM medium                              |
+| `paid_display`   | dclid, hsClkId (JioHotstar), or UTM medium       |
 | `paid_affiliate` | irclickid or UTM medium                          |
 | `ai_search`      | Referrer from ChatGPT, Perplexity, Claude, etc.  |
 | `organic_search` | Referrer from Google, Bing, DuckDuckGo, etc.     |
