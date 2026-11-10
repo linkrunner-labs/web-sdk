@@ -284,8 +284,51 @@
     // JioHotstar click id, from the `hsClkId` landing-URL param (stored lowercase, see
     // normalizeHotstarClickId). Hotstar's own pixel keeps it for 7 days; this keeps it for
     // the 90 days every other click id gets, so a later conversion still ties to the ad.
-    'hsclkid'
+    'hsclkid',
+    // Snapchat Ads click id, for web postbacks to the Snapchat Conversions API
+    // (LIN-3939). Stored lowercase like its neighbours; Snapchat spells it `ScCid`
+    // on the URL, which CLICK_ID_URL_ALIASES handles.
+    'sccid',
+    // Reddit Ads click id, for web postbacks to the Reddit Conversions API
+    // (LIN-3940). Reddit spells it `rdt_cid` on the URL, which is already the
+    // storage key, so it needs no alias.
+    'rdt_cid'
   ];
+
+  // A click id whose landing-URL spelling is not its storage key. Every other key in
+  // CLICK_ID_KEYS appears on the URL exactly as it is stored, so this is the one
+  // exception rather than a general case: Snapchat's macro is `ScCid`, and query
+  // params are read case-sensitively (getQueryParams). The lowercase and uppercase
+  // forms are accepted too, for a link built by hand or passed through a tool that
+  // normalised the case. Order is preference order.
+  var CLICK_ID_URL_ALIASES = {
+    sccid: ['ScCid', 'sc_cid']
+  };
+
+  // The landing URL's value for a click id, honouring the aliases above. The alias
+  // match is case INSENSITIVE on the parameter name: the point of the list is a link
+  // built by hand or passed through a tool that normalised the case, and enumerating
+  // spellings covered four of the thirty-two ways "sccid" can be cased, missing
+  // Sccid and SCCid, which are no less likely than the ones listed. Exact-key for
+  // everything else, so nothing else widens.
+  function clickIdFromParams(params, key) {
+    var aliases = CLICK_ID_URL_ALIASES[key];
+    if (!aliases) return params[key];
+    var wanted = {};
+    for (var i = 0; i < aliases.length; i++) wanted[aliases[i].toLowerCase()] = i;
+    var best = -1;
+    var value = '';
+    for (var name in params) {
+      if (!Object.prototype.hasOwnProperty.call(params, name)) continue;
+      var rank = wanted[name.toLowerCase()];
+      if (rank === undefined || !params[name]) continue;
+      if (best === -1 || rank < best) {
+        best = rank;
+        value = params[name];
+      }
+    }
+    return value;
+  }
 
   // Google auto-tagging puts the campaign id (gad_campaignid) on the landing URL only,
   // next to the click id. Persisting it with the click lets an event on a later page,
@@ -948,17 +991,20 @@
     // Click IDs → localStorage (last-touch with TTL)
     for (var j = 0; j < CLICK_ID_KEYS.length; j++) {
       var cidKey = CLICK_ID_KEYS[j];
-      if (params[cidKey]) {
+      // clickIdFromParams, not params[cidKey]: a click id the network spells differently
+      // on the URL than we store it under (Snapchat's `ScCid`) is read through its alias.
+      var cidValue = clickIdFromParams(params, cidKey);
+      if (cidValue) {
         var current = getClickRecord(cidKey);
-        if (isNewClick(cidKey, params[cidKey], current, params, newClickIds)) {
-          if (current && current.v !== params[cidKey]) rememberEarlierClickId(cidKey, current);
+        if (isNewClick(cidKey, cidValue, current, params, newClickIds)) {
+          if (current && current.v !== cidValue) rememberEarlierClickId(cidKey, current);
           var ranked = LAST_CLICK_KEYS.indexOf(cidKey) >= 0;
           if (ranked && landingSeq === null) landingSeq = nextClickSequence();
           newClickIds[cidKey] = true;
-          setClickId(cidKey, params[cidKey], ranked ? landingSeq : undefined);
+          setClickId(cidKey, cidValue, ranked ? landingSeq : undefined);
         }
-        foundClickIds[cidKey] = params[cidKey];
-        setFirstTouchClickId(cidKey, params[cidKey]);
+        foundClickIds[cidKey] = cidValue;
+        setFirstTouchClickId(cidKey, cidValue);
       }
     }
     // fbc/fbp in a URL (a cross-domain hop passing the pixel's ids on) are not an ad click.
@@ -1104,6 +1150,14 @@
     if (clickIds.dclid) return { type: 'paid_display', name: 'google' };
     if (clickIds.hsclkid) return { type: 'paid_display', name: 'jiohotstar' };
     if (clickIds.irclickid) return { type: 'paid_affiliate', name: 'impact' };
+    // Last of the click-id rungs, so adding it cannot change how a URL carrying two
+    // click ids already resolved. A Snap click usually arrives from the in-app
+    // webview with no referrer, so without this it reads as direct/direct, and with a
+    // referrer as organic social: either way the paid visit is invisible as paid.
+    if (clickIds.sccid) return { type: 'paid_social', name: 'snapchat' };
+    // Same reasoning as Snapchat's rung above, and also last: without it a Reddit
+    // click read as direct, or as organic social when the referrer survived.
+    if (clickIds.rdt_cid) return { type: 'paid_social', name: 'reddit' };
 
     // 2. UTM medium based
     if (utms.utm_medium) {
@@ -1897,7 +1951,7 @@
     send(payload);
   };
   window.lr.getAppDownloadURL = getAppDownloadURL;
-  window.lr._version = '0.1.23';
+  window.lr._version = '0.1.24';
 
   // The landing's click ids and UTMs before any queued call is replayed: a call queued
   // before the script loaded was most likely made on this landing, so it belongs to its
